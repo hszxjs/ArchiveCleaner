@@ -23,12 +23,9 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 
 ### 核心特性
 
-- 🔍 **四档搜索引擎**
+- 🔍 **双引擎搜索**
   - **Everything**（默认）：秒级搜索，依赖 [Everything](https://www.voidtools.com/) 索引服务
-  - **Win32 遍历**：通用兜底，零依赖
-  - **fdfind**：基于 [fd](https://github.com/sharkdp/fd) 的并行遍历，无需索引
-  - **MFT**：直读 NTFS 主文件表，最快（需管理员权限）
-  - 引擎不可用时自动降级
+  - **Win32 遍历**：通用兜底，零依赖，自动降级
 
 - 🗑️ **安全删除**
   - 送入回收站（可恢复）或永久删除
