@@ -1,7 +1,7 @@
 # ArchiveCleaner
 
 <p align="center">
-  <img src="release/assets/icon.png" width="128" height="128" alt="ArchiveCleaner">
+  <img src="icon.png" width="128" height="128" alt="ArchiveCleaner">
 </p>
 
 <p align="center">
