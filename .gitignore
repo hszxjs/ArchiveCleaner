@@ -1,0 +1,10 @@
+build/
+release/
+_tools/*.exe
+_tools/*.cs
+*.obj
+*.pdb
+*.ilk
+config.json
+delete_log.txt
+.zcode/
