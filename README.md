@@ -128,3 +128,15 @@ ISCC.exe installer.iss
 ## 许可证
 
 本项目仅供学习和个人使用。
+
+### 第三方组件
+
+本项目使用了以下开源组件，在此表示感谢。完整的许可证信息见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
+
+- [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) (Apache 2.0) — GPU UI 框架
+- [GLFW](https://www.glfw.org/) (zlib) — 窗口和输入
+- [FreeType](https://freetype.org/) (FTL) — 字体渲染
+- [yyjson](https://github.com/ibireme/yyjson) (MIT) — JSON 解析
+- [stb_image](https://github.com/nothings/stb) (Public Domain) — 图像加载
+- [fd](https://github.com/sharkdp/fd) (MIT) — 文件搜索工具
+- [Everything](https://www.voidtools.com/) — 文件索引服务
