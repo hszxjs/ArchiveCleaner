@@ -19,7 +19,7 @@
 
 ## 简介
 
-ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下的压缩包文件，通过复选框批量勾选后一键删除（送入回收站或永久删除）。支持多种搜索引擎，删除失败时自动检测占用进程。
+ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下的压缩包文件，通过复选框批量勾选后一键删除（送入回收站或永久删除）。删除失败时自动检测占用进程。
 
 ### 核心特性
 
@@ -42,10 +42,6 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
   - 零外部 DLL 依赖（全部静态链接）
   - 基于 [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) GPU 渲染框架
 
-## 截图
-
-> *在此处放置软件截图*
-
 ## 下载安装
 
 ### 方式一：安装包（推荐）
@@ -61,24 +57,23 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 ## 使用方法
 
 1. 在路径栏输入或粘贴要扫描的文件夹路径（为空时点击路径栏可弹窗选择）
-2. 点击「开始扫描」
-3. 勾选要删除的压缩包文件（支持全选/反选）
-4. 选择删除方式（回收站 / 永久删除）
-5. 点击「删除选中」并确认
+2. 选择搜索引擎（Everything / Win32）
+3. 点击「开始扫描」
+4. 勾选要删除的压缩包文件（支持全选/反选）
+5. 选择删除方式（回收站 / 永久删除）
+6. 点击「删除选中」并确认
 
 ## 从源码构建
 
 ### 环境要求
 
 - Visual Studio 2022 Build Tools（MSVC v143）
-- CMake 3.20+（通过 Qt 安装器获取或独立安装）
+- CMake 3.20+
 - Ninja 构建器
 
 ### 编译步骤
 
 ```bat
-# 加载 MSVC 环境后
-cd A:\ArchiveCleaner
 build.bat
 ```
 
@@ -102,25 +97,13 @@ ISCC.exe installer.iss
 │  状态机 + app::async 异步编排         │
 ├─────────────────────────────────────┤
 │  Core 层 (纯 Win32 + STL)           │
-│  四档引擎 + Deleter + ProcessChecker │
+│  引擎 + Deleter + ProcessChecker     │
 └─────────────────────────────────────┘
 ```
 
-- **Core 层**：纯 Win32 API + STL，零框架依赖，可独立测试
+- **Core 层**：纯 Win32 API + STL，零框架依赖
 - **Domain 层**：AppModel 持有状态机和数据，通过 `app::async` 编排异步任务
-- **UI 层**：极薄的 compose 函数，声明式构建界面，所有操作委托给 Domain
-
-## 开发文档
-
-- [架构设计](docs/ARCHITECTURE_EUI.md)
-- [调研笔记（Win32 API）](docs/RESEARCH_NOTES.md)
-- [依赖清单](docs/DEPENDENCIES.md)
-
-## 致谢
-
-- [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) — 高性能 GPU UI 框架
-- [Everything](https://www.voidtools.com/) — 最快的 Windows 文件搜索引擎
-- [fd](https://github.com/sharkdp/fd) — 简单快速的文件查找工具
+- **UI 层**：极薄的 compose 函数，声明式构建界面
 
 ## 许可证
 
@@ -128,12 +111,9 @@ ISCC.exe installer.iss
 
 ### 第三方组件
 
-本项目使用了以下开源组件，在此表示感谢。完整的许可证信息见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
+本项目使用了以下开源组件，在此表示感谢。完整许可证信息见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
 
 - [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) (Apache 2.0) — GPU UI 框架
 - [GLFW](https://www.glfw.org/) (zlib) — 窗口和输入
 - [FreeType](https://freetype.org/) (FTL) — 字体渲染
-- [yyjson](https://github.com/ibireme/yyjson) (MIT) — JSON 解析
-- [stb_image](https://github.com/nothings/stb) (Public Domain) — 图像加载
-- [fd](https://github.com/sharkdp/fd) (MIT) — 文件搜索工具
 - [Everything](https://www.voidtools.com/) — 文件索引服务

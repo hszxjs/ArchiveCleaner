@@ -2,9 +2,12 @@ build/
 release/
 _tools/*.exe
 _tools/*.cs
+_tools/*.ps1
+_tools/*.bat
 *.obj
 *.pdb
 *.ilk
 config.json
 delete_log.txt
 .zcode/
+build_and_run.bat

@@ -69,7 +69,8 @@ struct PageState {
     std::string pathInput;       // 路径输入框文本（UTF-8）
     bool showSettings = false;
     eui::Signal<float> scrollOffset{0.0f};  // 文件列表的滚动偏移
-    eui::Signal<int> deleteModeIndex{0};    // 删除方式：0=回收站, 1=永久
+    int deleteSel = 0;          // 删除方式：0=回收站, 1=永久（不用 Signal）
+    int engineSel = -1;         // 引擎选择：0=Everything, 1=Win32, 2=fdfind, 3=MFT（-1=未初始化）
     // 删除确认对话框
     eui::Signal<bool> deleteConfirmOpen{false};
     int deleteConfirmCount = 0;
@@ -102,9 +103,18 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     if (page->pathInput.empty()) {
         page->pathInput = w2u(m.config.lastScanPath);
     }
-    // 初始化删除方式下拉（0=回收站, 1=永久）
-    if (page->deleteModeIndex.get() == 0 && m.config.permanentDelete()) {
-        page->deleteModeIndex.set(1);
+    // 初始化删除方式
+    if (page->deleteSel == 0 && m.config.permanentDelete()) {
+        page->deleteSel = 1;
+    }
+    // 初始化引擎选择（从 config 映射）
+    if (page->engineSel < 0) {
+        switch (m.config.searchEngine) {
+            case ac::EngineType::Walk:       page->engineSel = 1; break;
+            case ac::EngineType::Fdfind:     page->engineSel = 2; break;
+            case ac::EngineType::Mft:        page->engineSel = 3; break;
+            default:                         page->engineSel = 0; break;
+        }
     }
 
     // 周期更新扫描已用时
@@ -144,9 +154,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     // --- 控制区（标签+输入框+按钮 用 row；dropdown 单独绝对定位避免被 row 裁剪弹出列表）---
     {
         float btnScanW = 96.0f * scale;
-        float ddW = 120.0f * scale;
         float labelW = 30.0f * scale;
-        float inputW = std::max(60.0f * scale, contentW - labelW - btnScanW - ddW - 3 * gap);
+        float inputW = std::max(60.0f * scale, contentW - labelW - btnScanW - 2 * gap);
         float x = pad;
 
         ui.text("path.label").position(x, curY + 8 * scale).text("路径").fontSize(fontSizeNormal).build();
@@ -192,6 +201,14 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                     m.cancelScan();
                 } else {
                     page->scrollOffset.set(0.0f);
+                    // 从 radio 索引映射到引擎类型（0=Everything, 1=Win32, 2=fdfind, 3=MFT）
+                    // 从引擎选择映射到类型
+                    switch (page->engineSel) {
+                        case 1: m.config.searchEngine = ac::EngineType::Walk; break;
+                        case 2: m.config.searchEngine = ac::EngineType::Fdfind; break;
+                        case 3: m.config.searchEngine = ac::EngineType::Mft; break;
+                        default: m.config.searchEngine = ac::EngineType::Everything; break;
+                    }
                     std::wstring folder;
                     int n = MultiByteToWideChar(CP_UTF8, 0, page->pathInput.c_str(), -1, nullptr, 0);
                     if (n > 1) {
@@ -204,15 +221,42 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 }
             })
             .build();
-        x += btnScanW + gap;
 
-        // 用 segmented 替代 dropdown（并排按钮切换，无弹出列表裁剪问题）
-        ui.stack("delmode.wrap").position(x, curY).size(ddW, btnH).content([&]{
-            components::segmented(ui, "delmode")
-                .size(ddW, btnH)
+        curY += btnH + gap;
+    }
+
+    // --- 第二行控制区：搜索引擎选择（segmented）+ 删除方式（segmented）---
+    {
+        float engW = contentW * 0.62f;
+        float delW = contentW - engW - gap;
+        float ex = pad;
+
+        // 引擎 segmented：用普通 int + selected + onChange（不用 Signal/bind）
+        ui.stack("engine.wrap").position(ex, curY).size(engW, btnH).content([&]{
+            components::segmented(ui, "engine")
+                .size(engW, btnH)
                 .fontSize(fontSizeSmall)
-                .items({"回收站", "永久"})
-                .bind(page->deleteModeIndex)
+                .items({"Everything", "Win32", "fdfind", "MFT"})
+                .selected(page->engineSel)
+                .onChange([page](int v) {
+                    page->engineSel = v;
+                    app::requestUpdate();
+                })
+                .build();
+        }).build();
+        ex += engW + gap;
+
+        // 删除方式 segmented
+        ui.stack("delmode.wrap").position(ex, curY).size(delW, btnH).content([&]{
+            components::segmented(ui, "delmode")
+                .size(delW, btnH)
+                .fontSize(fontSizeSmall)
+                .items({"\xE5\x9B\x9E\xE6\x94\xB6\xE7\xAB\x99", "\xE6\xB0\xB8\xE4\xB9\x85"})
+                .selected(page->deleteSel)
+                .onChange([page](int v) {
+                    page->deleteSel = v;
+                    app::requestUpdate();
+                })
                 .build();
         }).build();
 
@@ -324,7 +368,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                     .onClick([&m, page, selCount]{
                         page->deleteConfirmCount = selCount;
                         page->deleteConfirmSize = m.selectedTotalSize();
-                        page->deleteConfirmPermanent = (page->deleteModeIndex.get() == 1);
+                        page->deleteConfirmPermanent = (page->deleteSel == 1);
                         m.saveConfig();
                         page->deleteConfirmOpen.set(true);
                     })

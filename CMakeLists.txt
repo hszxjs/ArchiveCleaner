@@ -50,12 +50,21 @@ add_executable(ArchiveCleaner
 target_link_libraries(ArchiveCleaner PRIVATE ac_domain)
 eui_neo_configure_app(ArchiveCleaner)
 
-# 确保 assets 拷到 exe 目录（运行时窗口图标需要）
+# 确保 assets 和搜索工具拷到 exe 目录
 add_custom_command(TARGET ArchiveCleaner POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ArchiveCleaner>/assets"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${EUI_SRC}/assets" "$<TARGET_FILE_DIR:ArchiveCleaner>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/release/es.exe" "$<TARGET_FILE_DIR:ArchiveCleaner>/es.exe"
 )
+# fd.exe 可选（不存在不报错）
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/release/fd.exe")
+    add_custom_command(TARGET ArchiveCleaner POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/release/fd.exe" "$<TARGET_FILE_DIR:ArchiveCleaner>/fd.exe"
+    )
+endif()
 
 # 显式加入图标 rc 资源（eui_neo_configure_app 的 target_sources 因 scope 问题未生效）
 # EUI 的 CMakeLists 生成了 eui_app_icon.rc（指向 EUI 源码的 assets/icon.ico，已替换为 AC 图标）
