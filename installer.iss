@@ -40,6 +40,7 @@ Source: "A:\ArchiveCleaner\release\ArchiveCleaner.exe"; DestDir: "{app}"; Flags:
 Source: "A:\ArchiveCleaner\release\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 搜索工具
 Source: "A:\ArchiveCleaner\release\es.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "A:\ArchiveCleaner\release\fd.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Everything 安装包（嵌入，安装时提取并静默安装）
 Source: "A:\ArchiveCleaner\release\Everything-Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall ignoreversion; Tasks: installeverything
 

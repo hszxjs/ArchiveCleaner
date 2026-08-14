@@ -67,6 +67,7 @@ public:
     std::chrono::steady_clock::time_point scanStartTime;
     std::atomic<int64_t> scanElapsedMs{0};
     std::atomic<bool> scanDegraded{false};  // 是否降级过（提示用户）
+    std::wstring scanDegradeReason;         // 降级原因
 
     // === 删除进度（工作线程写，原子量） ===
     std::atomic<int> deleteDone{0};

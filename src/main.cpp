@@ -48,6 +48,15 @@ static std::wstring pickFolder() {
     return result;
 }
 
+// 请求管理员权限：用 ShellExecuteW runas 重启自身（UAC 弹窗）
+// 返回 true 表示已发起提权重启（当前进程应退出）
+static bool requestElevation() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    HINSTANCE ret = ShellExecuteW(nullptr, L"runas", exePath, L"--elevated", nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(ret) > 32;  // >32 表示成功
+}
+
 namespace app {
 
 using ac::ArchiveFile;
@@ -154,41 +163,40 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     // --- 控制区（标签+输入框+按钮 用 row；dropdown 单独绝对定位避免被 row 裁剪弹出列表）---
     {
         float btnScanW = 96.0f * scale;
+        float browseW = 36.0f * scale;
         float labelW = 30.0f * scale;
-        float inputW = std::max(60.0f * scale, contentW - labelW - btnScanW - 2 * gap);
+        float inputW = std::max(60.0f * scale, contentW - labelW - btnScanW - browseW - 3 * gap);
         float x = pad;
 
         ui.text("path.label").position(x, curY + 8 * scale).text("路径").fontSize(fontSizeNormal).build();
         x += labelW + gap;
 
-        // 路径输入框：为空时 placeholder 提示 + 点击弹窗选路径；不为空时正常编辑
-        bool pathEmpty = page->pathInput.empty();
+        // 路径输入框：始终可编辑，placeholder 提示
         components::input(ui, "path.input")
             .position(x, curY)
             .size(inputW, btnH)
             .value(page->pathInput)
-            .placeholder(pathEmpty ? "Hello ArchiveCleaner" : "")
+            .placeholder("Hello ArchiveCleaner")
             .onChange([page](std::string v){ page->pathInput = std::move(v); })
             .build();
-
-        // 为空时：叠一个透明点击区，点击弹出文件夹选择对话框
-        if (pathEmpty) {
-            ui.rect("path.clicker")
-                .position(x, curY)
-                .size(inputW, btnH)
-                .color(theme::color(0.0f, 0.0f, 0.0f, 0.0f))  // 完全透明
-                .onClick([&m, page]{
-                    // 弹出文件夹选择对话框（Win32 IFileOpenDialog）
-                    std::wstring folder = pickFolder();
-                    if (!folder.empty()) {
-                        page->pathInput = w2u(folder);
-                        m.config.lastScanPath = folder;
-                        m.saveConfig();
-                    }
-                })
-                .build();
-        }
         x += inputW + gap;
+
+        // 浏览按钮（始终可用，点击弹出文件夹选择对话框）
+        components::button(ui, "path.browse")
+            .position(x, curY)
+            .size(browseW, btnH)
+            .fontSize(fontSizeNormal)
+            .text("...")
+            .onClick([&m, page]{
+                std::wstring folder = pickFolder();
+                if (!folder.empty()) {
+                    page->pathInput = w2u(folder);
+                    m.config.lastScanPath = folder;
+                    m.saveConfig();
+                }
+            })
+            .build();
+        x += browseW + gap;
 
         bool scanning = ac::isScanning(st);
         components::button(ui, "scan.btn")
@@ -239,6 +247,15 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 .items({"Everything", "Win32", "fdfind", "MFT"})
                 .selected(page->engineSel)
                 .onChange([page](int v) {
+                    // 选 MFT 且没有管理员权限时，请求提权（UAC 弹窗后重启程序）
+                    if (v == 3 && !ac::path::isElevated()) {
+                        if (requestElevation()) {
+                            // 提权成功：退出当前进程，由提权后的新进程接管
+                            exit(0);
+                        }
+                        // 提权被拒：不切换到 MFT
+                        return;
+                    }
                     page->engineSel = v;
                     app::requestUpdate();
                 })
@@ -269,7 +286,12 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         int f = m.filesFound.load();
         int64_t ms = m.scanElapsedMs.load();
         std::string msg = "搜索中 · " + std::to_string(f) + " 个文件 · 已用 " + std::to_string(ms / 1000) + "秒";
-        if (m.scanDegraded) msg += "（已降级到 Win32）";
+        if (m.scanDegraded) {
+            msg += "（已降级到 Win32）";
+            if (!m.scanDegradeReason.empty()) {
+                msg += "：" + w2u(m.scanDegradeReason);
+            }
+        }
         ui.text("scan.progress").position(pad, curY).text(msg).fontSize(fontSizeSmall).build();
         curY += fontSizeSmall + gap;
         float fullTimeMs = m.scanDegraded ? 60000.0f : 3000.0f;

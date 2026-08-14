@@ -46,12 +46,14 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
         [this, folder, recursive, type](const app::async::CancelToken& token) {
             auto engine = createEngine(type, config);
             bool degraded = false;
+            std::wstring degradeReason;
             if (!engine->isAvailable()) {
-                // 降级到 Walk
+                degradeReason = engine->unavailableReason();
                 engine = createEngine(EngineType::Walk, config);
                 degraded = true;
             }
             scanDegraded = degraded;
+            scanDegradeReason = degradeReason;
             engine->run(folder, recursive, scanCancelFlag,
                 [this](const ArchiveFile& af) {
                     // 工作线程：追加到文件列表（加锁）
