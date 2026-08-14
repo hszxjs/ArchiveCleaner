@@ -79,7 +79,7 @@ struct PageState {
     bool showSettings = false;
     eui::Signal<float> scrollOffset{0.0f};  // 文件列表的滚动偏移
     int deleteSel = 0;          // 删除方式：0=回收站, 1=永久（不用 Signal）
-    int engineSel = -1;         // 引擎选择：0=Everything, 1=Win32, 2=fdfind, 3=MFT（-1=未初始化）
+    int engineSel = -1;         // 引擎选择：0=Everything, 1=Win32（fdfind/MFT 保留代码但不暴露）
     // 删除确认对话框
     eui::Signal<bool> deleteConfirmOpen{false};
     int deleteConfirmCount = 0;
@@ -120,8 +120,6 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     if (page->engineSel < 0) {
         switch (m.config.searchEngine) {
             case ac::EngineType::Walk:       page->engineSel = 1; break;
-            case ac::EngineType::Fdfind:     page->engineSel = 2; break;
-            case ac::EngineType::Mft:        page->engineSel = 3; break;
             default:                         page->engineSel = 0; break;
         }
     }
@@ -209,13 +207,11 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                     m.cancelScan();
                 } else {
                     page->scrollOffset.set(0.0f);
-                    // 从 radio 索引映射到引擎类型（0=Everything, 1=Win32, 2=fdfind, 3=MFT）
-                    // 从引擎选择映射到类型
-                    switch (page->engineSel) {
-                        case 1: m.config.searchEngine = ac::EngineType::Walk; break;
-                        case 2: m.config.searchEngine = ac::EngineType::Fdfind; break;
-                        case 3: m.config.searchEngine = ac::EngineType::Mft; break;
-                        default: m.config.searchEngine = ac::EngineType::Everything; break;
+                    // 引擎映射：0=Everything, 1=Win32
+                    if (page->engineSel == 1) {
+                        m.config.searchEngine = ac::EngineType::Walk;
+                    } else {
+                        m.config.searchEngine = ac::EngineType::Everything;
                     }
                     std::wstring folder;
                     int n = MultiByteToWideChar(CP_UTF8, 0, page->pathInput.c_str(), -1, nullptr, 0);
@@ -239,23 +235,15 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         float delW = contentW - engW - gap;
         float ex = pad;
 
-        // 引擎 segmented：用普通 int + selected + onChange（不用 Signal/bind）
+        // 引擎 segmented：扫描中 onChange 里拦截（segmented 无 disabled API）
         ui.stack("engine.wrap").position(ex, curY).size(engW, btnH).content([&]{
             components::segmented(ui, "engine")
                 .size(engW, btnH)
                 .fontSize(fontSizeSmall)
-                .items({"Everything", "Win32", "fdfind", "MFT"})
+                .items({"Everything", "Win32"})
                 .selected(page->engineSel)
-                .onChange([page](int v) {
-                    // 选 MFT 且没有管理员权限时，请求提权（UAC 弹窗后重启程序）
-                    if (v == 3 && !ac::path::isElevated()) {
-                        if (requestElevation()) {
-                            // 提权成功：退出当前进程，由提权后的新进程接管
-                            exit(0);
-                        }
-                        // 提权被拒：不切换到 MFT
-                        return;
-                    }
+                .onChange([page, &m](int v) {
+                    if (ac::isScanning(m.state)) return;  // 扫描中不允许切换
                     page->engineSel = v;
                     app::requestUpdate();
                 })

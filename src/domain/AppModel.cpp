@@ -87,9 +87,12 @@ void AppModel::startScan(const std::wstring& folder, bool recursive) {
 
 void AppModel::cancelScan() {
     if (state != AppState::Scanning) return;
-    state = AppState::ScanCancelling;
     scanCancelFlag = true;
     app::async::cancel("scan");
+    // 直接回 Idle（async cancel 后回调不会触发，状态会卡在 Cancelling）
+    state = AppState::Idle;
+    scanElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - scanStartTime).count();
     app::requestUpdate();
 }
 

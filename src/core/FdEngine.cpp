@@ -77,18 +77,17 @@ std::pair<bool, std::wstring> FdEngine::run(
         return {false, L"路径不存在：" + normFolder};
     }
 
-    // 拼参数：-e zip -e rar ... --absolute --no-ignore --hidden "" "folder"
-    // fd 输出 UTF-8
+    // fd 语法：fd [options] [path]（不传 pattern = 匹配所有）
+    // 传空字符串 "" 会被 fd 当作空正则，匹配 0 个文件
     std::wstring args;
     for (const auto& e : archiveExts()) {
         args += L"-e " + utf8ToW(e) + L" ";
     }
-    args += L"--absolute --no-ignore --hidden";
+    args += L"-a --no-ignore --hidden";
     if (!recursive) {
         args += L" --max-depth 1";
     }
-    // pattern 空串 + folder，都加引号
-    args += L" \"\" \"" + normFolder + L"\"";
+    args += L" \"" + normFolder + L"\"";
 
     int filesFound = 0;
     auto r = ProcessRunner::run(exe, args, cancel,

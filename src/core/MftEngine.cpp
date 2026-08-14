@@ -128,24 +128,32 @@ std::pair<bool, std::wstring> MftEngine::run(
         }
     }
 
-    // 第一遍：建目录 FRN→路径 映射（前缀匹配，只收扫描根下）
+    // 第一遍：建目录 FRN→路径 映射（多轮迭代直到不再新增——MFT 记录不按层级顺序返回）
     FrnMap dirMap;
     dirMap.insert({rootFrn, rootPrefix});
-    enumUsnRecords(hVol, maxUsn, cancel, [&](const USN_RECORD_V2* r) {
-        if (!(r->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return;
-        std::wstring name = recordFileName(r);
-        // 跳过回收站和系统目录（不加入映射，其下文件自然拼不出路径被排除）
-        if (_wcsicmp(name.c_str(), L"$RECYCLE.BIN") == 0) return;
-        if (_wcsicmp(name.c_str(), L"System Volume Information") == 0) return;
-        auto it = dirMap.find(static_cast<uint64_t>(r->ParentFileReferenceNumber));
-        if (it != dirMap.end()) {
-            std::wstring full = it->second + name + L"\\";
-            if (full.size() >= rootPrefix.size() &&
-                _wcsnicmp(full.c_str(), rootPrefix.c_str(), rootPrefix.size()) == 0) {
-                dirMap.insert({static_cast<uint64_t>(r->FileReferenceNumber), full});
+    bool added = true;
+    int pass = 0;
+    while (added && pass < 10 && !cancel.load()) {
+        added = false;
+        pass++;
+        enumUsnRecords(hVol, maxUsn, cancel, [&](const USN_RECORD_V2* r) {
+            if (!(r->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return;
+            std::wstring name = recordFileName(r);
+            if (_wcsicmp(name.c_str(), L"$RECYCLE.BIN") == 0) return;
+            if (_wcsicmp(name.c_str(), L"System Volume Information") == 0) return;
+            uint64_t frn = static_cast<uint64_t>(r->FileReferenceNumber);
+            if (dirMap.count(frn)) return;  // 已在映射中
+            auto it = dirMap.find(static_cast<uint64_t>(r->ParentFileReferenceNumber));
+            if (it != dirMap.end()) {
+                std::wstring full = it->second + name + L"\\";
+                if (full.size() >= rootPrefix.size() &&
+                    _wcsnicmp(full.c_str(), rootPrefix.c_str(), rootPrefix.size()) == 0) {
+                    dirMap.insert({frn, full});
+                    added = true;
+                }
             }
-        }
-    });
+        });
+    }
 
     // 第二遍：枚举文件，按扩展名过滤，拼路径
     int filesFound = 0;
