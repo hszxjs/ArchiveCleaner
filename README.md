@@ -115,4 +115,4 @@ third_party/
 
 ## 许可证
 
-本项目仅供学习和个人使用。第三方组件许可证见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
+本项目采用 [MIT License](LICENSE) 开源。第三方组件许可证见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
