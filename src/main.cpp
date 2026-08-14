@@ -80,6 +80,7 @@ struct PageState {
     eui::Signal<float> scrollOffset{0.0f};  // 文件列表的滚动偏移
     int deleteSel = 0;          // 删除方式：0=回收站, 1=永久（不用 Signal）
     int engineSel = -1;         // 引擎选择：0=Everything, 1=Win32（fdfind/MFT 保留代码但不暴露）
+    int themeSel = 0;           // 主题：0=夜间, 1=日间
     // 删除确认对话框
     eui::Signal<bool> deleteConfirmOpen{false};
     int deleteConfirmCount = 0;
@@ -107,11 +108,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     PageState* page = &ui.state<PageState>("page");
     auto& m = g_model;
     auto st = m.state.load();
-
-    // 初始化路径输入为上次扫描路径
-    if (page->pathInput.empty()) {
-        page->pathInput = w2u(m.config.lastScanPath);
-    }
+    // 启动时路径输入框留空（显示 placeholder 欢迎语），不填上次路径
     // 初始化删除方式
     if (page->deleteSel == 0 && m.config.permanentDelete()) {
         page->deleteSel = 1;
@@ -141,20 +138,41 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     const float rowH = 52.0f * scale;
 
     // 外层 stack：主界面 + dialogs
+    // 日间/夜间主题：背景 rect 颜色随 themeSel 切换（zIndex 最低，作为底色）
     ui.stack("appRoot")
         .size(screen.width, screen.height)
         .content([&] {
 
+    // 主题背景（夜间=深灰，日间=浅灰白）
+    // 用 dirtyKey 强制颜色变化时重绘该 rect
+    {
+        bool lightMode = (page->themeSel == 1);
+        ui.rect(lightMode ? "theme.bg.light" : "theme.bg.dark")
+            .size(screen.width, screen.height)
+            .color(lightMode ? theme::color(0.93f, 0.94f, 0.96f, 1.0f)
+                             : theme::color(0.16f, 0.18f, 0.20f, 1.0f))
+            .zIndex(0)
+            .build();
+    }
+
     // === 绝对布局：基于 screen 尺寸计算每个区域的 Y 坐标和高度 ===
-    // 这种方式不依赖 column 的自动空间分配（virtualList 不支持 fill），可靠且响应式。
     float curY = pad;
     const float contentW = screen.width - 2 * pad;
 
-    // --- 标题栏（固定高度）---
+    // 主题 token：日间/夜间切换
+    bool lightMode = (page->themeSel == 1);
+    auto themeTokens = lightMode ? components::theme::light() : components::theme::dark();
+    auto textColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)   // 近黑
+                               : theme::color(0.92f, 0.93f, 0.95f, 1.0f); // 近白
+    auto mutedColor = lightMode ? theme::color(0.35f, 0.37f, 0.40f, 1.0f)
+                                : theme::color(0.65f, 0.67f, 0.70f, 1.0f);
+
+    // --- 标题栏 ---
     ui.text("title")
         .position(pad, curY)
         .text("压缩包清理工具")
         .fontSize(fontSizeTitle)
+        .color(textColor)
         .build();
     curY += fontSizeTitle + 1.5f * gap;
 
@@ -166,25 +184,28 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         float inputW = std::max(60.0f * scale, contentW - labelW - btnScanW - browseW - 3 * gap);
         float x = pad;
 
-        ui.text("path.label").position(x, curY + 8 * scale).text("路径").fontSize(fontSizeNormal).build();
+        ui.text("path.label").position(x, curY + 8 * scale).text("路径").fontSize(fontSizeNormal)
+            .color(textColor).build();
         x += labelW + gap;
 
-        // 路径输入框：始终可编辑，placeholder 提示
+        // 路径输入框
         components::input(ui, "path.input")
             .position(x, curY)
             .size(inputW, btnH)
             .value(page->pathInput)
             .placeholder("Hello ArchiveCleaner")
+            .theme(themeTokens)
             .onChange([page](std::string v){ page->pathInput = std::move(v); })
             .build();
         x += inputW + gap;
 
-        // 浏览按钮（始终可用，点击弹出文件夹选择对话框）
+        // 浏览按钮
         components::button(ui, "path.browse")
             .position(x, curY)
             .size(browseW, btnH)
             .fontSize(fontSizeNormal)
             .text("...")
+            .theme(themeTokens, false)
             .onClick([&m, page]{
                 std::wstring folder = pickFolder();
                 if (!folder.empty()) {
@@ -202,6 +223,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             .size(btnScanW, btnH).fontSize(fontSizeNormal)
             .text(scanning ? (st == ac::AppState::ScanCancelling ? "停止中..." : "停止扫描") : "开始扫描")
             .disabled(ac::isDeleting(st))
+            .theme(themeTokens, true)
             .onClick([&m, page]{
                 if (ac::isScanning(m.state)) {
                     m.cancelScan();
@@ -229,21 +251,23 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         curY += btnH + gap;
     }
 
-    // --- 第二行控制区：搜索引擎选择（segmented）+ 删除方式（segmented）---
+    // --- 第二行控制区：引擎选择 + 删除方式 + 主题切换 ---
     {
-        float engW = contentW * 0.62f;
-        float delW = contentW - engW - gap;
+        float engW = contentW * 0.42f;
+        float delW = 110.0f * scale;
+        float themeW = 90.0f * scale;
         float ex = pad;
 
-        // 引擎 segmented：扫描中 onChange 里拦截（segmented 无 disabled API）
+        // 引擎 segmented
         ui.stack("engine.wrap").position(ex, curY).size(engW, btnH).content([&]{
             components::segmented(ui, "engine")
                 .size(engW, btnH)
                 .fontSize(fontSizeSmall)
                 .items({"Everything", "Win32"})
+                .theme(themeTokens)
                 .selected(page->engineSel)
                 .onChange([page, &m](int v) {
-                    if (ac::isScanning(m.state)) return;  // 扫描中不允许切换
+                    if (ac::isScanning(m.state)) return;
                     page->engineSel = v;
                     app::requestUpdate();
                 })
@@ -257,9 +281,26 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 .size(delW, btnH)
                 .fontSize(fontSizeSmall)
                 .items({"\xE5\x9B\x9E\xE6\x94\xB6\xE7\xAB\x99", "\xE6\xB0\xB8\xE4\xB9\x85"})
+                .theme(themeTokens)
                 .selected(page->deleteSel)
                 .onChange([page](int v) {
                     page->deleteSel = v;
+                    app::requestUpdate();
+                })
+                .build();
+        }).build();
+        ex += delW + gap;
+
+        // 主题切换 segmented
+        ui.stack("theme.wrap").position(ex, curY).size(themeW, btnH).content([&]{
+            components::segmented(ui, "theme")
+                .size(themeW, btnH)
+                .fontSize(fontSizeSmall)
+                .items({"\xE5\xA4\x9C\xE9\x97\xB4", "\xE6\x97\xA5\xE9\x97\xB4"})
+                .theme(themeTokens)
+                .selected(page->themeSel)
+                .onChange([page](int v) {
+                    page->themeSel = v;
                     app::requestUpdate();
                 })
                 .build();
@@ -280,22 +321,24 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 msg += "：" + w2u(m.scanDegradeReason);
             }
         }
-        ui.text("scan.progress").position(pad, curY).text(msg).fontSize(fontSizeSmall).build();
+        ui.text("scan.progress").position(pad, curY).text(msg).fontSize(fontSizeSmall)
+            .color(mutedColor).build();
         curY += fontSizeSmall + gap;
         float fullTimeMs = m.scanDegraded ? 60000.0f : 3000.0f;
         float v = std::clamp(static_cast<float>(ms) / fullTimeMs, 0.0f, 0.95f);
-        // progress 不支持 position，用外层 stack 定位
         ui.stack("scan.bar.wrap").position(pad, curY).size(contentW, 6.0f * scale).content([&]{
             components::progress(ui, "scan.bar")
                 .size(contentW, 6.0f * scale)
                 .value(v)
+                .theme(themeTokens)
                 .build();
         }).build();
         curY += 6.0f * scale + gap;
     } else if (st == ac::AppState::Idle && !m.files.empty()) {
         int64_t ms = m.scanElapsedMs.load();
         std::string msg = "扫描完成 · 共 " + std::to_string((int)m.files.size()) + " 个 · 耗时 " + std::to_string(ms / 1000) + "秒";
-        ui.text("scan.done").position(pad, curY).text(msg).fontSize(fontSizeSmall).build();
+        ui.text("scan.done").position(pad, curY).text(msg).fontSize(fontSizeSmall)
+            .color(mutedColor).build();
         curY += fontSizeSmall + gap;
     }
 
@@ -319,7 +362,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         .itemCount(itemCount)
         .rowHeight(rowH)
         .bind(page->scrollOffset)
-        .row([&m, fontSizeNormal, fontSizeTiny, scale, rowH](eui::Ui& ui, const std::string& rowId, int64_t index, float w, float h) {
+        .row([&m, fontSizeNormal, fontSizeTiny, scale, rowH, lightMode](eui::Ui& ui, const std::string& rowId, int64_t index, float w, float h) {
             ArchiveFile af;
             bool selected = false;
             bool failed = false;
@@ -330,16 +373,24 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 selected = m.selectedPaths.count(af.path) > 0;
                 failed = m.failedPaths.count(af.path) > 0;
             }
+            auto rowTheme = lightMode ? components::theme::light() : components::theme::dark();
+            auto nameColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                       : theme::color(0.92f, 0.93f, 0.95f, 1.0f);
+            auto pathColor = lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
+                                       : theme::color(0.60f, 0.62f, 0.65f, 1.0f);
             ui.row(rowId).size(w, h).padding(8.0f * scale, 4.0f * scale).gap(10.0f * scale).content([&]{
                 components::checkbox(ui, rowId + ".chk")
                     .checked(selected)
+                    .theme(rowTheme)
                     .onChange([&m, path = af.path](bool v){ m.toggleSelect(path); })
                     .build();
                 ui.column(rowId + ".info").gap(2.0f * scale).content([&]{
                     std::string title = w2u(af.name) + "  ·  " + ac::sizeHuman(af.size);
                     if (failed) title = "[失败] " + title;
-                    ui.text(rowId + ".name").text(title).fontSize(fontSizeNormal).build();
-                    ui.text(rowId + ".path").text(w2u(af.path)).fontSize(fontSizeTiny).build();
+                    ui.text(rowId + ".name").text(title).fontSize(fontSizeNormal)
+                        .color(nameColor).build();
+                    ui.text(rowId + ".path").text(w2u(af.path)).fontSize(fontSizeTiny)
+                        .color(pathColor).build();
                 }).build();
             }).build();
         })
@@ -358,23 +409,28 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 .size(delBtnW, btnH).fontSize(fontSizeNormal)
                 .text(st == ac::AppState::DeleteCancelling ? "停止中..." : "取消删除")
                 .disabled(st == ac::AppState::DeleteCancelling)
+                .theme(themeTokens, false)
                 .onClick([&m]{ m.cancelDelete(); })
                 .build();
         } else {
             components::button(ui, "sel.all").position(bx, curY).size(selBtnW, btnH).fontSize(fontSizeNormal)
-                .text("全选").disabled(ac::isBusy(st)).onClick([&m]{ m.selectAll(); }).build();
+                .text("全选").disabled(ac::isBusy(st)).theme(themeTokens, false)
+                .onClick([&m]{ m.selectAll(); }).build();
             bx += selBtnW + gap;
             components::button(ui, "sel.none").position(bx, curY).size(selBtnW, btnH).fontSize(fontSizeNormal)
-                .text("全不选").disabled(ac::isBusy(st)).onClick([&m]{ m.selectNone(); }).build();
+                .text("全不选").disabled(ac::isBusy(st)).theme(themeTokens, false)
+                .onClick([&m]{ m.selectNone(); }).build();
             bx += selBtnW + gap;
             components::button(ui, "sel.inv").position(bx, curY).size(selBtnW, btnH).fontSize(fontSizeNormal)
-                .text("反选").disabled(ac::isBusy(st)).onClick([&m]{ m.invertSelection(); }).build();
+                .text("反选").disabled(ac::isBusy(st)).theme(themeTokens, false)
+                .onClick([&m]{ m.invertSelection(); }).build();
 
             if (selCount > 0) {
                 float dx = pad + contentW - delBtnW;
                 std::string delText = "删除选中(" + std::to_string(selCount) + "个)";
                 components::button(ui, "del.btn").position(dx, curY).size(delBtnW, btnH).fontSize(fontSizeNormal)
                     .text(delText).disabled(ac::isBusy(st))
+                    .theme(themeTokens, true)
                     .onClick([&m, page, selCount]{
                         page->deleteConfirmCount = selCount;
                         page->deleteConfirmSize = m.selectedTotalSize();
@@ -398,7 +454,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             s = "删除中 · " + std::to_string(m.deleteDone.load()) + "/" + std::to_string(m.deleteTotal.load())
               + " · 成功 " + std::to_string(m.deleteSuccess.load()) + " 失败 " + std::to_string(m.deleteFail.load());
         }
-        ui.text("status").position(pad, curY).text(s).fontSize(fontSizeSmall).build();
+        ui.text("status").position(pad, curY).text(s).fontSize(fontSizeSmall)
+            .color(mutedColor).build();
     }
 
         // === 对话框（必须在 root column 外部，作为 appRoot stack 的兄弟节点）===

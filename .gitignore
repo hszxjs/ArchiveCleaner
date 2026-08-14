@@ -1,13 +1,19 @@
+# Build artifacts
 build/
 release/
-_tools/*.exe
-_tools/*.cs
-_tools/*.ps1
-_tools/*.bat
+*.exe
 *.obj
 *.pdb
 *.ilk
+
+# Build tools (local only)
+_tools/
+
+# Runtime data
 config.json
 delete_log.txt
+
+# IDE / editor
 .zcode/
-build_and_run.bat
+.vscode/
+.idea/
