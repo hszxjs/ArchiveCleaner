@@ -125,6 +125,33 @@ Config Config::load() {
     }
     c.includeSubfolders = extractBool(json, "include_subfolders", true);
     c.lastScanPath      = utf8ToW(extractString(json, "last_scan_path"));
+    c.protectProgramDirs = extractBool(json, "protect_program_dirs", true);
+    // 自定义保护模式：简化解析 "custom_protected": ["\\path1\\", "\\path2\\"]
+    {
+        std::string needle = "\"custom_protected\"";
+        size_t k = json.find(needle);
+        if (k != std::string::npos) {
+            size_t open = json.find('[', k);
+            size_t close = json.find(']', open);
+            if (open != std::string::npos && close != std::string::npos) {
+                std::string arr = json.substr(open + 1, close - open - 1);
+                size_t pos = 0;
+                while (pos < arr.size()) {
+                    size_t q1 = arr.find('"', pos);
+                    if (q1 == std::string::npos) break;
+                    size_t q2 = arr.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    std::string item = arr.substr(q1 + 1, q2 - q1 - 1);
+                    if (!item.empty()) {
+                        // 转小写
+                        for (auto& ch : item) ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+                        c.customProtectedPatterns.push_back(utf8ToW(item));
+                    }
+                    pos = q2 + 1;
+                }
+            }
+        }
+    }
     return c;
 }
 
@@ -140,6 +167,13 @@ bool Config::save() const {
     f << "    \"accent_color\": \""       << escapeJson(accentColor) << "\",\n";
     f << "    \"delete_mode\": \""        << escapeJson(deleteMode) << "\",\n";
     f << "    \"include_subfolders\": "   << (includeSubfolders ? "true" : "false") << ",\n";
+    f << "    \"protect_program_dirs\": " << (protectProgramDirs ? "true" : "false") << ",\n";
+    f << "    \"custom_protected\": [";
+    for (size_t i = 0; i < customProtectedPatterns.size(); ++i) {
+        if (i) f << ", ";
+        f << "\"" << escapeJson(wToUtf8(customProtectedPatterns[i])) << "\"";
+    }
+    f << "],\n";
     f << "    \"last_scan_path\": \""     << escapeJson(wToUtf8(lastScanPath)) << "\"\n";
     f << "}\n";
     return static_cast<bool>(f);

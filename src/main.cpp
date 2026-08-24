@@ -450,6 +450,10 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         int sel = m.selectedCount();
         int64_t selSize = m.selectedTotalSize();
         std::string s = "扫描到 " + std::to_string(total) + " · 选中 " + std::to_string(sel) + " · 大小 " + ac::sizeHuman(selSize);
+        int skipped = m.protectedSkipped.load();
+        if (skipped > 0) {
+            s += " · 已跳过 " + std::to_string(skipped) + " 个程序/游戏文件";
+        }
         if (ac::isDeleting(st)) {
             s = "删除中 · " + std::to_string(m.deleteDone.load()) + "/" + std::to_string(m.deleteTotal.load())
               + " · 成功 " + std::to_string(m.deleteSuccess.load()) + " 失败 " + std::to_string(m.deleteFail.load());

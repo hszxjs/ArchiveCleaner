@@ -35,7 +35,8 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 
 - 📁 **智能扫描**
   - 自动排除回收站（`$RECYCLE.BIN`）和系统目录
-  - 支持 14 种压缩格式：`.zip .rar .7z .tar .gz .bz2 .tgz .xz .iso .cab .z .lz .lzma .tbz2`
+  - **程序目录保护**：自动跳过游戏/程序资源文件所在的目录（`.minecraft`、`mods`、`resourcepacks`、`shaderpacks`、`steamapps`、`Program Files`、`Windows`），防止误删 mods、材质包、游戏资源导致程序损坏
+  - 支持标准压缩格式 + 分卷压缩（`.z01`-`.z99`、`.r00`-`.r99`、`.7z.001`）+ 封装格式（`.jar` `.apk` `.wim` 等）
   - 路径归一化（正反斜杠混合不再导致删除失败）
 
 - 🌓 **日间/夜间主题切换**

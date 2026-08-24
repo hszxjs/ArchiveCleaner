@@ -31,6 +31,7 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
     scanStartTime = std::chrono::steady_clock::now();
     scanElapsedMs = 0;
     scanDegraded = false;
+    protectedSkipped = 0;
     dirsScanned = 0;
     filesFound = 0;
     {
@@ -55,11 +56,15 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
             scanDegraded = degraded;
             scanDegradeReason = degradeReason;
             engine->run(folder, recursive, scanCancelFlag,
-                [this](const ArchiveFile& af) {
-                    // 工作线程：追加到文件列表（加锁）
+                [this, protect = config.protectProgramDirs, &extraPatterns = config.customProtectedPatterns]
+                (const ArchiveFile& af) {
+                    // 保护目录过滤（mods/材质包/Steam/Program Files 等）
+                    if (protect && isProtectedPath(af.path, extraPatterns)) {
+                        protectedSkipped++;
+                        return;
+                    }
                     std::lock_guard<std::mutex> lk(filesMutex);
                     files.push_back(af);
-                    // 不在这里 requestUpdate（太频繁），让 onProgress 节流
                 },
                 [this](int d, int f) {
                     // 工作线程：更新进度原子量

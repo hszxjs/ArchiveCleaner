@@ -3,11 +3,11 @@
 
 #include "ISearchEngine.h"
 #include <string>
+#include <vector>
 
 namespace ac {
 
 // 配置项。对应 exe 同目录的 config.json。
-// 字段沿用旧版结构（UTF-8）。
 struct Config {
     EngineType searchEngine = EngineType::Everything;  // 默认 Everything（秒搜），不可用时自动降级到 Walk
     std::wstring fdPath = L".\\fd.exe";
@@ -20,8 +20,12 @@ struct Config {
     bool includeSubfolders = true;
     std::wstring lastScanPath;
 
+    // 程序目录保护（防止误删 mods/材质包/Steam 游戏文件等），默认开启
+    bool protectProgramDirs = true;
+    // 用户自定义保护路径模式（小写、两侧带反斜杠，如 L"\\genshin impact\\"）
+    std::vector<std::wstring> customProtectedPatterns;
+
     bool permanentDelete() const {
-        // deleteMode 以"永久删除"开头则永久
         return deleteMode.rfind("\xE6\xB0\xB8\xE4\xB9\x85\xE5\x88\xA0\xE9\x99\xA4", 0) == 0;  // "永久删除"
     }
 

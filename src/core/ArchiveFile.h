@@ -3,9 +3,50 @@
 
 #include <string>
 #include <cstdint>
+#include <cwctype>
 #include <vector>
 
 namespace ac {
+
+// 保护目录模式（小写，两侧带反斜杠匹配路径段）。
+// 这些目录下的压缩格式文件是程序/游戏资源（mods、材质包、Steam 游戏文件等），
+// 扫描时跳过，防止误删导致游戏/程序损坏。
+inline const std::vector<std::wstring>& protectedDirPatterns() {
+    static const std::vector<std::wstring> patterns = {
+        L"\\.minecraft\\",       // Minecraft 本体
+        L"\\mods\\",             // 通用 mod 目录（Minecraft/Terraria 等）
+        L"\\mod\\",
+        L"\\resourcepacks\\",    // Minecraft 材质包
+        L"\\shaderpacks\\",      // Minecraft 光影包
+        L"\\texturepacks\\",     // 旧版材质包
+        L"\\steamapps\\",        // Steam 游戏库
+        L"\\program files\\",    // 已安装程序
+        L"\\program files (x86)\\",
+        L"\\windows\\",          // 系统目录
+    };
+    return patterns;
+}
+
+// 判断路径是否在保护目录内（大小写不敏感的子串匹配）。
+// extraPatterns：用户自定义的额外模式（来自 config）。
+inline bool isProtectedPath(const std::wstring& normalizedPath,
+                            const std::vector<std::wstring>& extraPatterns = {}) {
+    // 路径转小写（只做一次）
+    std::wstring lower;
+    lower.reserve(normalizedPath.size());
+    for (wchar_t c : normalizedPath) {
+        lower.push_back(static_cast<wchar_t>(::towlower(c)));
+    }
+    // 确保末尾有反斜杠（匹配目录段需要，如 path\mods\file → 已含 \mods\）
+    for (const auto& p : protectedDirPatterns()) {
+        if (lower.find(p) != std::wstring::npos) return true;
+    }
+    for (const auto& p : extraPatterns) {
+        if (p.empty()) continue;
+        if (lower.find(p) != std::wstring::npos) return true;
+    }
+    return false;
+}
 
 // 压缩包扩展名白名单（不含点，全小写）。
 inline const std::vector<std::string>& archiveExts() {
