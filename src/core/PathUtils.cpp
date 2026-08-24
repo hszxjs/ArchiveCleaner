@@ -174,4 +174,28 @@ bool dirContainsExe(const std::wstring& dir) {
     return true;
 }
 
+bool dirContainsProjectMarker(const std::wstring& dir) {
+    if (dir.empty()) return false;
+    std::wstring base = dir;
+    if (base.back() != L'\\') base.push_back(L'\\');
+    // 精确名标记（目录或文件均可，GetFileAttributesW 一次调用）
+    const wchar_t* markers[] = {
+        L".git", L"package.json", L"Cargo.toml", L"go.mod",
+        L"pom.xml", L"build.gradle", L"CMakeLists.txt", L".svn",
+    };
+    for (const auto* m : markers) {
+        if (GetFileAttributesW((base + m).c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+    }
+    // *.sln 需要通配符（一个项目可能有多个）
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((base + L"*.sln").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        FindClose(h);
+        return true;
+    }
+    return false;
+}
+
 }} // namespace ac::path

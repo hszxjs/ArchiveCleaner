@@ -7,6 +7,7 @@
 #include "eui/async.h"   // app::async::restart/cancel
 
 #include <algorithm>
+#include <unordered_map>
 
 namespace ac {
 
@@ -44,7 +45,7 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
 
     // app::async::restart：回调自动回主线程（消灭 D.1 跨线程信号坑）
     app::async::restart("scan",
-        [this, folder, recursive, type](const app::async::CancelToken& token) {
+        [this, folder, recursive, type](const app::async::CancelToken& token) mutable {
             auto engine = createEngine(type, config);
             bool degraded = false;
             std::wstring degradeReason;
@@ -53,29 +54,43 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
                 engine = createEngine(EngineType::Walk, config);
                 degraded = true;
             }
+            // 目录风险检测缓存（本次扫描内有效；onFound 仅在单一工作线程顺序调用，无需加锁）
+            std::unordered_map<std::wstring, bool> dirCheckCache;
             scanDegraded = degraded;
             scanDegradeReason = degradeReason;
             engine->run(folder, recursive, scanCancelFlag,
                 [this, folder, protect = config.protectProgramDirs,
-                 &extraPatterns = config.customProtectedPatterns]
+                 &extraPatterns = config.customProtectedPatterns, &dirCheckCache]
                 (const ArchiveFile& af) {
                     if (protect) {
-                        // 第 1 层：内置 + 自定义目录模式（mods/材质包/Steam 等）
+                        // 第 1 层：内置 + 自定义目录模式（mods/游戏/开发依赖目录）
                         if (isProtectedPath(af.path, extraPatterns)) {
                             protectedSkipped++;
                             return;
                         }
-                        // 第 2 层：注册表安装路径（国产游戏的自定义安装目录，如 D:\Games\原神\）
+                        // 第 2 层：注册表安装路径（国产游戏的自定义安装目录）
                         if (path::startsWithAny(af.path, path::installedProgramDirs())) {
                             protectedSkipped++;
                             return;
                         }
-                        // 第 3 层：exe 同目录检测（绿色版游戏资源与 exe 同目录）。
-                        // 扫描根目录本身豁免（用户明确扫的根目录，如 Downloads 里有 exe 也不影响根级 zip）
+                        // 第 3+5 层：目录内容检测（含缓存，同目录多个文件只查一次）。
+                        //   exe 同目录 = 绿色版游戏资源；项目标记 = 源码项目目录。
+                        //   扫描根目录本身豁免（用户明确扫的根目录不拦）。
                         std::wstring parent = path::parentDir(af.path);
-                        if (!parent.empty() && parent != folder && path::dirContainsExe(parent)) {
-                            protectedSkipped++;
-                            return;
+                        if (!parent.empty() && parent != folder) {
+                            auto it = dirCheckCache.find(parent);
+                            bool risky;
+                            if (it != dirCheckCache.end()) {
+                                risky = it->second;
+                            } else {
+                                risky = path::dirContainsExe(parent)
+                                      || path::dirContainsProjectMarker(parent);
+                                dirCheckCache[parent] = risky;
+                            }
+                            if (risky) {
+                                protectedSkipped++;
+                                return;
+                            }
                         }
                     }
                     std::lock_guard<std::mutex> lk(filesMutex);

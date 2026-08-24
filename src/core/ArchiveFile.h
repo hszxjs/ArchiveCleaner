@@ -13,6 +13,7 @@ namespace ac {
 // 扫描时跳过，防止误删导致游戏/程序损坏。
 inline const std::vector<std::wstring>& protectedDirPatterns() {
     static const std::vector<std::wstring> patterns = {
+        // 游戏
         L"\\.minecraft\\",       // Minecraft 本体
         L"\\mods\\",             // 通用 mod 目录（Minecraft/Terraria 等）
         L"\\mod\\",
@@ -20,9 +21,22 @@ inline const std::vector<std::wstring>& protectedDirPatterns() {
         L"\\shaderpacks\\",      // Minecraft 光影包
         L"\\texturepacks\\",     // 旧版材质包
         L"\\steamapps\\",        // Steam 游戏库
+        // 程序安装位置
         L"\\program files\\",    // 已安装程序
         L"\\program files (x86)\\",
         L"\\windows\\",          // 系统目录
+        // 开发依赖（无 exe、无注册表，其他层覆盖不到）
+        L"\\node_modules\\",     // npm 依赖（大量 .tgz）
+        L"\\.m2\\",              // Maven 本地仓库（大量 .jar）
+        L"\\.gradle\\",          // Gradle 缓存
+        L"\\.nuget\\",           // NuGet 包
+        L"\\site-packages\\",    // Python 安装包
+        L"\\venv\\",             // Python 虚拟环境
+        L"\\.venv\\",
+        L"\\vendor\\",           // 项目第三方依赖（PHP/Go 等）
+        L"\\third_party\\",      // 项目内嵌依赖源码
+        L"\\3rdparty\\",
+        L"\\__pycache__\\",      // Python 编译缓存
     };
     return patterns;
 }

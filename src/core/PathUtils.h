@@ -47,6 +47,11 @@ bool startsWithAny(const std::wstring& path, const std::vector<std::wstring>& pr
 // 一次 FindFirstFileW 调用。
 bool dirContainsExe(const std::wstring& dir);
 
+// 判断目录是否是项目根（含 .git/package.json/Cargo.toml/go.mod/pom.xml/
+// build.gradle/CMakeLists.txt/*.sln 任一标记文件）。
+// 源码项目里的压缩包是构建资源或素材，删除会破坏项目。
+bool dirContainsProjectMarker(const std::wstring& dir);
+
 }} // namespace ac::path
 
 #endif // AC_PATH_UTILS_H
