@@ -35,7 +35,10 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 
 - 📁 **智能扫描**
   - 自动排除回收站（`$RECYCLE.BIN`）和系统目录
-  - **程序目录保护**：自动跳过游戏/程序资源文件所在的目录（`.minecraft`、`mods`、`resourcepacks`、`shaderpacks`、`steamapps`、`Program Files`、`Windows`），防止误删 mods、材质包、游戏资源导致程序损坏
+  - **程序目录保护（三层）**：防止误删 mods、材质包、游戏资源导致程序损坏
+    1. 内置模式：`.minecraft`、`mods`、`resourcepacks`、`shaderpacks`、`steamapps`、`Program Files`、`Windows`
+    2. 注册表安装路径：自动枚举所有已安装程序的安装目录（含国产游戏的自定义路径，如 `D:\Games\某游戏\`）
+    3. exe 同目录检测：绿色版/免安装游戏的资源包与游戏 exe 同目录，自动跳过
   - 支持标准压缩格式 + 分卷压缩（`.z01`-`.z99`、`.r00`-`.r99`、`.7z.001`）+ 封装格式（`.jar` `.apk` `.wim` 等）
   - 路径归一化（正反斜杠混合不再导致删除失败）
 

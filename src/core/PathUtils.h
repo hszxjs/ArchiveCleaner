@@ -2,6 +2,7 @@
 #define AC_PATH_UTILS_H
 
 #include <string>
+#include <vector>
 
 namespace ac {
 namespace path {
@@ -29,6 +30,22 @@ std::wstring appDir();
 
 // 从路径取文件名（最后一个反斜杠或斜杠之后的部分）
 std::wstring fileName(const std::wstring& path);
+
+// 从路径取父目录（去掉最后的文件名和反斜杠；无反斜杠返回空）
+std::wstring parentDir(const std::wstring& normalizedPath);
+
+// === 程序目录保护（防止误删游戏/程序资源）===
+
+// 枚举注册表中所有已安装程序的 InstallLocation（含国产游戏的自定义安装目录）。
+// 首次调用后缓存（注册表不常变）。返回小写化、带尾反斜杠的前缀列表。
+const std::vector<std::wstring>& installedProgramDirs();
+
+// 判断路径是否以任一前缀开头（大小写不敏感）。prefixes 为小写带尾反斜杠。
+bool startsWithAny(const std::wstring& path, const std::vector<std::wstring>& prefixes);
+
+// 判断目录中是否含有 .exe 文件（绿色版游戏的资源包总与游戏 exe 同目录）。
+// 一次 FindFirstFileW 调用。
+bool dirContainsExe(const std::wstring& dir);
 
 }} // namespace ac::path
 

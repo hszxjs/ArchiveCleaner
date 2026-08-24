@@ -56,12 +56,27 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
             scanDegraded = degraded;
             scanDegradeReason = degradeReason;
             engine->run(folder, recursive, scanCancelFlag,
-                [this, protect = config.protectProgramDirs, &extraPatterns = config.customProtectedPatterns]
+                [this, folder, protect = config.protectProgramDirs,
+                 &extraPatterns = config.customProtectedPatterns]
                 (const ArchiveFile& af) {
-                    // 保护目录过滤（mods/材质包/Steam/Program Files 等）
-                    if (protect && isProtectedPath(af.path, extraPatterns)) {
-                        protectedSkipped++;
-                        return;
+                    if (protect) {
+                        // 第 1 层：内置 + 自定义目录模式（mods/材质包/Steam 等）
+                        if (isProtectedPath(af.path, extraPatterns)) {
+                            protectedSkipped++;
+                            return;
+                        }
+                        // 第 2 层：注册表安装路径（国产游戏的自定义安装目录，如 D:\Games\原神\）
+                        if (path::startsWithAny(af.path, path::installedProgramDirs())) {
+                            protectedSkipped++;
+                            return;
+                        }
+                        // 第 3 层：exe 同目录检测（绿色版游戏资源与 exe 同目录）。
+                        // 扫描根目录本身豁免（用户明确扫的根目录，如 Downloads 里有 exe 也不影响根级 zip）
+                        std::wstring parent = path::parentDir(af.path);
+                        if (!parent.empty() && parent != folder && path::dirContainsExe(parent)) {
+                            protectedSkipped++;
+                            return;
+                        }
                     }
                     std::lock_guard<std::mutex> lk(filesMutex);
                     files.push_back(af);
