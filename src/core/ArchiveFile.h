@@ -7,12 +7,37 @@
 
 namespace ac {
 
-// 压缩包扩展名白名单（14 种，不含点，全小写）。
-// inline 函数返回引用，避免全局变量的初始化顺序问题。
+// 压缩包扩展名白名单（不含点，全小写）。
 inline const std::vector<std::string>& archiveExts() {
     static const std::vector<std::string> exts = {
-        "zip", "rar", "7z", "tar", "gz", "bz2", "tgz",
-        "xz", "iso", "cab", "z", "lz", "lzma", "tbz2"
+        // 标准压缩格式
+        "zip", "rar", "7z", "tar", "gz", "bz2", "tgz", "xz", "iso", "cab",
+        "z", "lz", "lzma", "tbz2", "zst", "lz4", "br", "bz",
+        // 封装/打包格式
+        "jar", "war", "ear", "apk", "xapk", "wim", "rpm", "deb",
+        "arj", "lzh", "ace", "arc", "pak", "cpio", "squashfs",
+        // ZIP 分卷（.z01-.z99）
+        "z01", "z02", "z03", "z04", "z05", "z06", "z07", "z08", "z09",
+        "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
+        "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
+        "z30", "z31", "z32", "z33", "z34", "z35", "z36", "z37", "z38", "z39",
+        "z40", "z41", "z42", "z43", "z44", "z45", "z46", "z47", "z48", "z49",
+        "z50", "z51", "z52", "z53", "z54", "z55", "z56", "z57", "z58", "z59",
+        "z60", "z61", "z62", "z63", "z64", "z65", "z66", "z67", "z68", "z69",
+        "z70", "z71", "z72", "z73", "z74", "z75", "z76", "z77", "z78", "z79",
+        "z80", "z81", "z82", "z83", "z84", "z85", "z86", "z87", "z88", "z89",
+        "z90", "z91", "z92", "z93", "z94", "z95", "z96", "z97", "z98", "z99",
+        // RAR 旧分卷（.r00-.r99）
+        "r00", "r01", "r02", "r03", "r04", "r05", "r06", "r07", "r08", "r09",
+        "r10", "r11", "r12", "r13", "r14", "r15", "r16", "r17", "r18", "r19",
+        "r20", "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29",
+        "r30", "r31", "r32", "r33", "r34", "r35", "r36", "r37", "r38", "r39",
+        "r40", "r41", "r42", "r43", "r44", "r45", "r46", "r47", "r48", "r49",
+        "r50", "r51", "r52", "r53", "r54", "r55", "r56", "r57", "r58", "r59",
+        "r60", "r61", "r62", "r63", "r64", "r65", "r66", "r67", "r68", "r69",
+        "r70", "r71", "r72", "r73", "r74", "r75", "r76", "r77", "r78", "r79",
+        "r80", "r81", "r82", "r83", "r84", "r85", "r86", "r87", "r88", "r89",
+        "r90", "r91", "r92", "r93", "r94", "r95", "r96", "r97", "r98", "r99"
     };
     return exts;
 }
@@ -42,20 +67,48 @@ struct ArchiveFile {
     }
 
     // 是否是压缩包扩展名（从任意文件名判断，用于扫描时过滤）
+    // 处理三类：
+    // 1. 标准扩展名（.zip .rar .7z ...）
+    // 2. 分卷专用扩展名（.z01-.z99 .r00-.r99）
+    // 3. 数字序号分卷（.001-.999）—— 仅当倒数第二段扩展名是压缩格式时才算
+    //    （如 xxx.zip.001 算，但 photo.001 不算）
     static bool isArchiveExt(const std::wstring& fileName) {
+        // 取最后一个扩展名
         size_t i = fileName.find_last_of(L'.');
         if (i == std::wstring::npos) return false;
-        std::wstring we = fileName.substr(i + 1);
-        // 逐字节窄化 + 转小写（扩展名假定 ASCII）
+        std::string last = toLowerAscii(fileName.substr(i + 1));
+
+        // 快速路径：标准扩展名或分卷专用扩展名直接查表
+        for (const auto& x : archiveExts()) {
+            if (last == x) return true;
+        }
+
+        // 慢路径：数字序号（如 "001"），检查倒数第二段是否是压缩格式
+        if (last.size() == 3 && last[0] >= '0' && last[0] <= '9'
+            && last[1] >= '0' && last[1] <= '9' && last[2] >= '0' && last[2] <= '9') {
+            std::wstring base = fileName.substr(0, i);
+            size_t j = base.find_last_of(L'.');
+            if (j == std::wstring::npos) return false;
+            std::string second = toLowerAscii(base.substr(j + 1));
+            // 倒数第二段必须是标准压缩扩展名（不含分卷扩展名，避免 .z01.001 这种嵌套）
+            static const std::vector<std::string> baseExts = {
+                "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "lz4", "br"
+            };
+            for (const auto& x : baseExts) {
+                if (second == x) return true;
+            }
+        }
+        return false;
+    }
+
+    // 辅助：wstring 扩展名转小写 ASCII string
+    static std::string toLowerAscii(const std::wstring& we) {
         std::string e;
         e.reserve(we.size());
         for (wchar_t wc : we) {
             e.push_back(static_cast<char>(::tolower(static_cast<unsigned char>(wc & 0xFF))));
         }
-        for (const auto& x : archiveExts()) {
-            if (e == x) return true;
-        }
-        return false;
+        return e;
     }
 };
 
