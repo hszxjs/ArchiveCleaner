@@ -12,6 +12,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <map>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -139,16 +140,37 @@ struct PageState {
     };
     std::vector<ProtRow> protRows;
     std::vector<std::string> expandedApps;  // 已展开的软件组 key（原因+软件名）
+
+    // 主扫描结果列表：按软件归类的扁平化行模型（扫描中实时平铺，空闲后分组）
+    struct MainRow {
+        int kind = 0;                       // 0=软件组头 1=文件
+        std::string app;                    // kind 0 软件显示名（兼作展开 key）
+        int count = 0;                      // kind 0 组内文件数
+        std::vector<std::wstring> paths;    // kind 0 组内全部文件路径（组级勾选）
+        ArchiveFile file;                   // kind 1
+        bool last = false;                  // kind 1 组内最后（└─ / ├─）
+    };
+    std::vector<MainRow> mainRows;
+    std::vector<std::string> expandedMainApps;                     // 已展开的软件组名
+    std::map<std::wstring, std::pair<std::string, bool>> appNameCache;  // 目录→(显示名,强识别)，跨扫描复用避免重复磁盘IO
+    int lastListState = -1;                                        // 上次列表状态（检测进入空闲时刻）
+    size_t lastListFiles = (size_t)-1;                             // 上次列表文件数
 };
 
 // 识别受保护目录所属软件的显示名（弹窗分组标题，让用户一眼认出软件）：
 // ① 关键词（steamapps/minecraft/node_modules 等精确规则）
 // ② findAppIdentity：向上找 exe 读版本资源名 / 反查注册表 DisplayName / 有意义目录段
-static std::string resolveAppName(const std::wstring& dir) {
+// strong=确凿软件名（关键词/exe/注册表）；false=目录段兜底（主列表归入"未归类"）
+static std::string resolveAppName(const std::wstring& dir, bool& strong) {
+    strong = true;
     std::string app = detectAppName(dir);
     if (!app.empty()) return app;
     ac::path::AppIdentity id = ac::path::findAppIdentity(dir);
-    if (!id.name.empty()) return w2u(id.name);
+    if (!id.name.empty()) {
+        strong = (id.source != ac::path::AppIdentity::PathSegment);
+        return w2u(id.name);
+    }
+    strong = false;
     size_t sep = dir.find_last_of(L'\\');
     return w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
 }
@@ -180,7 +202,8 @@ static void rebuildProtRows(app::PageState* page) {
         if (!g) {
             DirGroup ng;
             ng.dir = dir;
-            ng.app = resolveAppName(dir);
+            bool strongIgnored = false;
+            ng.app = resolveAppName(dir, strongIgnored);
             for (auto& br : byReason) {
                 if (br.first == reason) { br.second.push_back(std::move(ng)); g = &br.second.back(); break; }
             }
@@ -238,6 +261,70 @@ static void rebuildProtRows(app::PageState* page) {
                     page->protRows.push_back(r3);
                 }
             }
+        }
+    }
+}
+
+// 主扫描结果按软件归类重建行模型：
+//   ▸ 软件名 (N)   ← 组头：组级勾选 + 展开/收起
+//     ├─ 文件名·大小 / 路径（两行）
+// 识别不确凿（目录段兜底）的统一进"未归类文件"组，软件组按数量降序排前。
+static void rebuildMainRows(app::PageState* page) {
+    auto& m = g_model;
+    page->mainRows.clear();
+    struct Grp { std::string name; bool misc = false; std::vector<ArchiveFile> files; };
+    std::vector<Grp> grps;
+    std::map<std::string, size_t> byName;
+    {
+        std::lock_guard<std::mutex> lk(m.filesMutex);
+        for (const auto& f : m.files) {
+            std::wstring dir = ac::path::parentDir(f.path);
+            std::string name;
+            bool strong = false;
+            auto cit = page->appNameCache.find(dir);
+            if (cit != page->appNameCache.end()) {
+                name = cit->second.first;
+                strong = cit->second.second;
+            } else {
+                name = resolveAppName(dir, strong);
+                page->appNameCache[dir] = {name, strong};
+            }
+            if (!strong) name = "\xE6\x9C\xAA\xE5\xBD\x92\xE7\xB1\xBB\xE6\x96\x87\xE4\xBB\xB6";  // 未归类文件
+            auto it = byName.find(name);
+            size_t gi;
+            if (it == byName.end()) {
+                gi = grps.size();
+                byName[name] = gi;
+                grps.push_back({});
+                grps.back().name = name;
+                grps.back().misc = !strong;
+            } else {
+                gi = it->second;
+            }
+            grps[gi].files.push_back(f);
+        }
+    }
+    std::stable_sort(grps.begin(), grps.end(), [](const Grp& a, const Grp& b) {
+        if (a.misc != b.misc) return !a.misc;          // 软件组在前，未归类殿后
+        if (a.files.size() != b.files.size()) return a.files.size() > b.files.size();
+        return false;                                   // 同数量保持首见顺序
+    });
+    for (auto& g : grps) {
+        bool open = std::find(page->expandedMainApps.begin(), page->expandedMainApps.end(), g.name)
+                    != page->expandedMainApps.end();
+        PageState::MainRow r0;
+        r0.kind = 0;
+        r0.app = g.name;
+        r0.count = (int)g.files.size();
+        for (const auto& f : g.files) r0.paths.push_back(f.path);
+        page->mainRows.push_back(std::move(r0));
+        if (!open) continue;
+        for (size_t i = 0; i < g.files.size(); ++i) {
+            PageState::MainRow r1;
+            r1.kind = 1;
+            r1.file = g.files[i];
+            r1.last = i + 1 == g.files.size();
+            page->mainRows.push_back(std::move(r1));
         }
     }
 }
@@ -510,6 +597,21 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         itemCount = static_cast<int64_t>(m.files.size());
     }
 
+    // 扫描结果按软件归类：进入空闲或文件数变化时重建行模型
+    // （扫描/删除进行中保持平铺实时显示；软件名识别结果缓存在 appNameCache，跨扫描不重复做磁盘IO）
+    {
+        size_t filesNow = (size_t)itemCount;
+        if (filesNow != page->lastListFiles || (int)st != page->lastListState) {
+            page->lastListFiles = filesNow;
+            page->lastListState = (int)st;
+            if (st == ac::AppState::Idle && filesNow > 0) {
+                rebuildMainRows(page);
+            }
+        }
+    }
+    bool grouped = (st == ac::AppState::Idle && !page->mainRows.empty());
+    if (grouped) itemCount = (int64_t)page->mainRows.size();
+
     // virtualList 不支持 position，用外层 stack 定位
     ui.stack("fileList.wrap").position(pad, curY).size(contentW, listH).content([&]{
     components::virtualList(ui, "fileList")
@@ -517,37 +619,132 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         .itemCount(itemCount)
         .rowHeight(rowH)
         .bind(page->scrollOffset)
-        .row([&m, fontSizeNormal, fontSizeTiny, scale, rowH, lightMode](eui::Ui& ui, const std::string& rowId, int64_t index, float w, float h) {
-            ArchiveFile af;
-            bool selected = false;
-            bool failed = false;
-            {
-                std::lock_guard<std::mutex> lk(m.filesMutex);
-                if (index < 0 || index >= (int64_t)m.files.size()) return;
-                af = m.files[index];
-                selected = m.selectedPaths.count(af.path) > 0;
-                failed = m.failedPaths.count(af.path) > 0;
-            }
+        .row([&](eui::Ui& ui, const std::string& rowId, int64_t index, float w, float h) {
             auto rowTheme = lightMode ? components::theme::light() : components::theme::dark();
             auto nameColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
                                        : theme::color(0.92f, 0.93f, 0.95f, 1.0f);
             auto pathColor = lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
                                        : theme::color(0.60f, 0.62f, 0.65f, 1.0f);
-            ui.row(rowId).size(w, h).padding(8.0f * scale, 4.0f * scale).gap(10.0f * scale).content([&]{
-                components::checkbox(ui, rowId + ".chk")
-                    .checked(selected)
-                    .theme(rowTheme)
-                    .onChange([&m, path = af.path](bool v){ m.toggleSelect(path); })
-                    .build();
-                ui.column(rowId + ".info").gap(2.0f * scale).content([&]{
-                    std::string title = w2u(af.name) + "  ·  " + ac::sizeHuman(af.size);
-                    if (failed) title = "[失败] " + title;
-                    ui.text(rowId + ".name").text(title).fontSize(fontSizeNormal)
-                        .color(nameColor).build();
-                    ui.text(rowId + ".path").text(w2u(af.path)).fontSize(fontSizeTiny)
-                        .color(pathColor).build();
+            auto muted2 = pathColor;
+
+            if (grouped) {
+                if (index < 0 || index >= (int64_t)page->mainRows.size()) return;
+                if (page->mainRows[(size_t)index].kind == 0) {
+                    // 软件组头：组级勾选（勾=组内全选）+ 展开/收起（整行可点）
+                    const auto& r = page->mainRows[(size_t)index];
+                bool open = std::find(page->expandedMainApps.begin(),
+                                      page->expandedMainApps.end(), r.app)
+                            != page->expandedMainApps.end();
+                bool allSel = true;
+                {
+                    std::lock_guard<std::mutex> lk(m.filesMutex);
+                    for (const auto& p : r.paths) {
+                        if (m.selectedPaths.count(p) == 0) { allSel = false; break; }
+                    }
+                }
+                ui.stack(rowId).size(w, h).content([&]{
+                    ui.rect(rowId + ".hit").size(w, h)
+                        .states(theme::color(0.0f, 0.0f, 0.0f, 0.0f),
+                                themeTokens.surfaceHover,
+                                themeTokens.surfaceHover)
+                        .radius(6.0f * scale)
+                        .onClick([page, gi = index]{
+                            if (gi < 0 || gi >= (int64_t)page->mainRows.size()) return;
+                            if (page->mainRows[(size_t)gi].kind != 0) return;
+                            std::string app = page->mainRows[(size_t)gi].app;
+                            auto& v = page->expandedMainApps;
+                            auto it = std::find(v.begin(), v.end(), app);
+                            if (it != v.end()) v.erase(it);
+                            else v.push_back(app);
+                            rebuildMainRows(page);
+                            app::requestUpdate();
+                        })
+                        .build();
+                    ui.row(rowId + ".c").size(w, h)
+                        .padding(10.0f * scale, 0, 8.0f * scale, 0).gap(8.0f * scale)
+                        .alignItems(core::Align::CENTER).content([&]{
+                            components::checkbox(ui, rowId + ".gchk")
+                                .checked(allSel)
+                                .theme(rowTheme)
+                                .onChange([&m, page, gi = index](bool v){
+                                    if (gi < 0 || gi >= (int64_t)page->mainRows.size()) return;
+                                    if (page->mainRows[(size_t)gi].kind != 0) return;
+                                    const auto& paths = page->mainRows[(size_t)gi].paths;
+                                    bool all = true;
+                                    {
+                                        std::lock_guard<std::mutex> lk(m.filesMutex);
+                                        for (const auto& p : paths) {
+                                            if (m.selectedPaths.count(p) == 0) { all = false; break; }
+                                        }
+                                    }
+                                    bool want = !all;  // 全选↔全不选
+                                    for (const auto& p : paths) {
+                                        bool has;
+                                        {
+                                            std::lock_guard<std::mutex> lk(m.filesMutex);
+                                            has = m.selectedPaths.count(p) > 0;
+                                        }
+                                        if (has != want) m.toggleSelect(p);
+                                    }
+                                })
+                                .build();
+                            ui.text(rowId + ".a")
+                                .text(open ? "\xE2\x96\xBE" : "\xE2\x96\xB8")  // ▾ ▸
+                                .fontSize(fontSizeSmall).color(muted2).build();
+                            ui.text(rowId + ".n")
+                                .text(r.app + " (" + std::to_string(r.count) + ")")
+                                .fontSize(fontSizeNormal).color(nameColor).build();
+                        }).build();
                 }).build();
-            }).build();
+                    return;
+                }
+            }
+
+            // 文件行（平铺模式 或 分组模式展开的成员；分组模式多一个缩进+连接符）
+            ArchiveFile af;
+            bool selected = false;
+            bool failed = false;
+            bool last = false;
+            float padL = 8.0f * scale;
+            std::string conn;
+            if (grouped) {
+                if (index < 0 || index >= (int64_t)page->mainRows.size()) return;
+                const auto& r = page->mainRows[(size_t)index];
+                if (r.kind != 1) return;
+                af = r.file;
+                last = r.last;
+                padL = 34.0f * scale;
+                conn = last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ";  // └─ ├─
+            } else {
+                std::lock_guard<std::mutex> lk(m.filesMutex);
+                if (index < 0 || index >= (int64_t)m.files.size()) return;
+                af = m.files[index];
+            }
+            {
+                std::lock_guard<std::mutex> lk(m.filesMutex);
+                selected = m.selectedPaths.count(af.path) > 0;
+                failed = m.failedPaths.count(af.path) > 0;
+            }
+            ui.row(rowId).size(w, h).padding(padL, 4.0f * scale, 8.0f * scale, 4.0f * scale)
+                .gap(8.0f * scale).alignItems(core::Align::CENTER).content([&]{
+                    if (!conn.empty()) {
+                        ui.text(rowId + ".cn").text(conn)
+                            .fontSize(fontSizeTiny).color(muted2).build();
+                    }
+                    components::checkbox(ui, rowId + ".chk")
+                        .checked(selected)
+                        .theme(rowTheme)
+                        .onChange([&m, path = af.path](bool v){ m.toggleSelect(path); })
+                        .build();
+                    ui.column(rowId + ".info").gap(2.0f * scale).content([&]{
+                        std::string title = w2u(af.name) + "  \xC2\xB7  " + ac::sizeHuman(af.size);
+                        if (failed) title = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + title;  // [失败]
+                        ui.text(rowId + ".name").text(title).fontSize(fontSizeNormal)
+                            .color(nameColor).build();
+                        ui.text(rowId + ".path").text(w2u(af.path)).fontSize(fontSizeTiny)
+                            .color(pathColor).build();
+                    }).build();
+                }).build();
         })
         .build();
     }).build();  // fileList.wrap stack 结束

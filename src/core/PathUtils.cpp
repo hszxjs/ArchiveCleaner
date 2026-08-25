@@ -352,7 +352,7 @@ AppIdentity findAppIdentity(const std::wstring& fileDir) {
                 if (base.size() > 4) base = base.substr(0, base.size() - 4);
                 name = base;
             }
-            return {ancestor, name};
+            return {ancestor, name, AppIdentity::Exe};
         }
         std::wstring up = parentDir(ancestor);
         if (up == ancestor || up.empty()) break;
@@ -376,7 +376,7 @@ AppIdentity findAppIdentity(const std::wstring& fileDir) {
     if (best) {
         std::wstring root = best->dir;
         while (root.size() > 3 && root.back() == L'\\') root.pop_back();
-        return {root, best->name};
+        return {root, best->name, AppIdentity::Registry};
     }
     // ③ 兜底：最后一个有意义的目录段（跳过通用名和版本号）
     std::wstring seg = fileDir;
@@ -385,7 +385,7 @@ AppIdentity findAppIdentity(const std::wstring& fileDir) {
         std::wstring cur = fileName(seg);
         if (cur.empty()) break;
         if (!isGenericSegment(cur) && !isVersionSegment(cur)) {
-            return {root, cur};
+            return {root, cur, AppIdentity::PathSegment};
         }
         std::wstring up = parentDir(seg);
         if (up == seg || up.empty()) break;
