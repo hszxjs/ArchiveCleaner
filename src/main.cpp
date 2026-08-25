@@ -50,22 +50,6 @@ static std::wstring pickFolder() {
     return result;
 }
 
-// 请求管理员权限：用 ShellExecuteW runas 重启自身（UAC 弹窗）
-// 返回 true 表示已发起提权重启（当前进程应退出）
-static bool requestElevation() {
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    HINSTANCE ret = ShellExecuteW(nullptr, L"runas", exePath, L"--elevated", nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<INT_PTR>(ret) > 32;  // >32 表示成功
-}
-
-namespace app {
-
-using ac::ArchiveFile;
-
-// 全局应用模型（EUI-NEO 的 app/domain 状态：跨 compose 存活，后台线程访问）
-static ac::AppModel g_model;
-
 // UTF-16 → UTF-8（供 EUI-NEO 显示，EUI-NEO 的 text 用 UTF-8 std::string）
 static std::string w2u(const std::wstring& s) {
     if (s.empty()) return {};
@@ -75,6 +59,49 @@ static std::string w2u(const std::wstring& s) {
     return out;
 }
 
+// 请求管理员权限：用 ShellExecuteW runas 重启自身（UAC 弹窗）
+// 返回 true 表示已发起提权重启（当前进程应退出）
+static bool requestElevation() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    HINSTANCE ret = ShellExecuteW(nullptr, L"runas", exePath, L"--elevated", nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(ret) > 32;  // >32 表示成功
+}
+
+// 从路径识别知名应用/游戏名（用于受保护文件弹窗的分组标题）
+static std::string detectAppName(const std::wstring& path) {
+    std::wstring lower;
+    lower.reserve(path.size());
+    for (wchar_t c : path) lower.push_back(static_cast<wchar_t>(::towlower(c)));
+    auto has = [&lower](const wchar_t* s) { return lower.find(s) != std::wstring::npos; };
+    // Steam：steamapps\common\游戏名 → 提取游戏名
+    size_t sc = lower.find(L"\\steamapps\\common\\");
+    if (sc != std::wstring::npos) {
+        size_t start = sc + 18;
+        size_t end = path.find(L'\\', start);
+        if (end == std::wstring::npos) end = path.size();
+        if (end > start) {
+            std::wstring game = path.substr(start, end - start);
+            return w2u(game);
+        }
+    }
+    if (has(L"\\.minecraft\\")) return "Minecraft";
+    if (has(L"\\node_modules\\")) return "npm \xE4\xBE\x9D\xE8\xB5\x96";                    // npm 依赖
+    if (has(L"genshin") || has(L"\xE5\x8E\x9F\xE7\xA5\x9E")) return "\xE5\x8E\x9F\xE7\xA5\x9E";  // 原神
+    if (has(L"\\wegame\\")) return "WeGame";
+    if (has(L"\\steam\\")) return "Steam";
+    if (has(L"\\electron\\") || has(L"\\resources\\app.asar")) return "Electron \xE5\xBA\x94\xE7\x94\xA8";  // Electron 应用
+    return {};  // 未识别 → 用目录名
+}
+
+namespace app {
+
+using ac::ArchiveFile;
+
+// 全局应用模型（EUI-NEO 的 app/domain 状态：跨 compose 存活，后台线程访问）
+static ac::AppModel g_model;
+
+// 页面状态（compose 间记住的 UI 态：输入框文本、滚动偏移、对话框开关等）
 // 页面状态（compose 间记住的 UI 态：输入框文本、滚动偏移、对话框开关等）
 struct PageState {
     std::string pathInput;       // 路径输入框文本（UTF-8）
@@ -94,6 +121,8 @@ struct PageState {
     int deleteResultSuccess = 0;
     int deleteResultFail = 0;
     bool deleteResultCancelled = false;
+    // 保护内容对话框
+    eui::Signal<bool> protectedDlgOpen{false};
 };
 
 const DslAppConfig& dslAppConfig() {
@@ -351,41 +380,13 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     bool deleting = ac::isDeleting(st);
     // 底部区域高度（按钮行 + 状态栏）
     float bottomH = btnH + fontSizeSmall + 2 * gap;
-    // 受保护文件分组数据（按目录分组，附原因）
-    struct ProtGroup {
-        std::wstring dir;
-        std::string reason;
-        std::vector<ArchiveFile> items;
-    };
-    std::vector<ProtGroup> protGroups;
+    // 受保护文件计数（分组在弹窗内构建）
+    size_t protTotal = 0;
     {
         std::lock_guard<std::mutex> lk(m.filesMutex);
-        std::unordered_map<std::wstring, size_t> groupIdx;
-        for (const auto& pf : m.protectedFiles) {
-            std::wstring dir = ac::path::parentDir(pf.path);
-            auto it = groupIdx.find(dir);
-            if (it == groupIdx.end()) {
-                groupIdx[dir] = protGroups.size();
-                ProtGroup g;
-                g.dir = dir;
-                auto rit = m.protectedReasons.find(pf.path);
-                g.reason = rit != m.protectedReasons.end() ? rit->second : "";
-                g.items.push_back(pf);
-                protGroups.push_back(std::move(g));
-            } else {
-                protGroups[it->second].items.push_back(pf);
-            }
-        }
+        protTotal = m.protectedFiles.size();
     }
-    size_t protTotal = 0;
-    for (auto& g : protGroups) protTotal += g.items.size();
-    // 受保护区高度（有内容时占用列表区的一部分）
-    float protH = 0.0f;
-    if (protTotal > 0) {
-        protH = std::min(200.0f * scale, (screen.height - curY - bottomH - pad) * 0.45f);
-    }
-    float listH = std::max(60.0f, screen.height - curY - bottomH - pad - protH
-                            - (protH > 0 ? gap : 0.0f));
+    float listH = std::max(60.0f, screen.height - curY - bottomH - pad);
     int64_t itemCount = 0;
     {
         std::lock_guard<std::mutex> lk(m.filesMutex);
@@ -435,119 +436,6 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     }).build();  // fileList.wrap stack 结束
     curY += listH + gap;
 
-    // --- 受保护文件区（树状图：目录为枝干、文件为叶子，可展开，复选框默认不勾）---
-    if (protTotal > 0) {
-        auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);   // 橙色警示
-        auto lineColor = lightMode ? theme::color(0.70f, 0.72f, 0.75f, 1.0f)
-                                   : theme::color(0.38f, 0.40f, 0.44f, 1.0f);  // 树线灰
-        float headH = 24.0f * scale;
-        float leafH = rowH * 0.78f;
-        float indent = 22.0f * scale;
-
-        ui.stack("prot.wrap").position(pad, curY).size(contentW, protH).content([&]{
-            components::scrollView(ui, "prot.scroll")
-                .size(contentW, protH)
-                .content([&](core::dsl::Ui& /*sui*/, float cw, float /*ch*/){
-                    ui.column("prot.col")
-                        .width(cw)
-                        .height(core::SizeValue::wrapContent())   // 关键：内容自适应高度，scrollView 才能测出真实高度并滚动
-                        .gap(2.0f * scale)
-                        .content([&]{
-                            // 标题行
-                            ui.text("prot.title")
-                                .text(std::string("\xE2\x9A\xA0 \xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6 ")  // ⚠ 受保护文件
-                                      + std::to_string(protTotal)
-                                      + std::string(" \xE4\xB8\xAA\xEF\xBC\x88\xE7\xA1\xAE\xE8\xAE\xA4\xE5\xAE\x89\xE5\x85\xA8\xE5\x90\x8E\xE5\x8F\xAF\xE5\x8B\xBE\xE9\x80\x89\xE5\x88\xA0\xE9\x99\xA4\xEF\xBC\x89"))
-                                .fontSize(fontSizeSmall)
-                                .color(warnColor)
-                                .build();
-
-                            for (size_t gi = 0; gi < protGroups.size(); ++gi) {
-                                auto& g = protGroups[gi];
-                                std::string gid = "prot.g" + std::to_string(gi);
-                                bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
-
-                                // 组头：左侧色条 + 折叠按钮（箭头+路径+数量）+ 原因标签
-                                ui.row(gid + ".hrow").width(cw).height(headH).gap(6.0f * scale)
-                                    .alignItems(core::Align::CENTER).content([&]{
-                                    // 左侧竖色条（树干）
-                                    ui.rect(gid + ".bar").size(3.0f * scale, headH * 0.8f)
-                                        .color(warnColor).radius(1.5f * scale).build();
-                                    // 折叠按钮
-                                    std::string header = (expanded ? "\xE2\x96\xBE " : "\xE2\x96\xB8 ")  // ▾ / ▸
-                                        + w2u(g.dir)
-                                        + std::string("  (") + std::to_string(g.items.size())
-                                        + std::string("\xE4\xB8\xAA)");  // 个)
-                                    components::button(ui, gid + ".head")
-                                        .size(cw - 3.0f * scale - 90.0f * scale - 12.0f * scale, headH)
-                                        .fontSize(fontSizeTiny)
-                                        .text(header)
-                                        .theme(themeTokens, false)
-                                        .onClick([page, dir = g.dir]{
-                                            auto& v = page->expandedDirs;
-                                            auto it = std::find(v.begin(), v.end(), dir);
-                                            if (it != v.end()) v.erase(it);
-                                            else v.push_back(dir);
-                                            app::requestUpdate();
-                                        })
-                                        .build();
-                                    // 原因标签（橙色小字）
-                                    ui.text(gid + ".reason")
-                                        .width(90.0f * scale).height(headH)
-                                        .text(g.reason)
-                                        .fontSize(fontSizeTiny)
-                                        .color(warnColor)
-                                        .verticalAlign(core::VerticalAlign::Center)
-                                        .build();
-                                }).build();
-
-                                // 叶子行：缩进 + 树连接符（├─ / └─）+ 复选框 + 文件名
-                                if (expanded) {
-                                    for (size_t fi = 0; fi < g.items.size(); ++fi) {
-                                        auto& pf = g.items[fi];
-                                        std::string rid = gid + ".f" + std::to_string(fi);
-                                        bool sel = m.selectedPaths.count(pf.path) > 0;
-                                        bool failed = m.failedPaths.count(pf.path) > 0;
-                                        bool last = (fi + 1 == g.items.size());
-                                        // 树连接符：非最后 ├─，最后 └─
-                                        std::string conn = last
-                                            ? "\xE2\x94\x94\xE2\x94\x80 "   // └─
-                                            : "\xE2\x94\x9C\xE2\x94\x80 ";  // ├─
-                                        ui.row(rid).width(cw).height(leafH)
-                                            .padding(indent, 0, 0, 0)
-                                            .gap(6.0f * scale)
-                                            .alignItems(core::Align::CENTER)
-                                            .content([&]{
-                                            // 连接符（灰色）
-                                            ui.text(rid + ".conn")
-                                                .text(conn)
-                                                .fontSize(fontSizeTiny)
-                                                .color(lineColor)
-                                                .build();
-                                            components::checkbox(ui, rid + ".chk")
-                                                .checked(sel)
-                                                .theme(themeTokens)
-                                                .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
-                                                .build();
-                                            std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
-                                            if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
-                                            ui.text(rid + ".name")
-                                                .text(label)
-                                                .fontSize(fontSizeTiny)
-                                                .color(failed ? warnColor
-                                                     : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
-                                                                  : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
-                                                .build();
-                                        }).build();
-                                    }
-                                }
-                            }
-                        }).build();
-                })
-                .build();
-        }).build();
-        curY += protH + gap;
-    }
 
     // --- 底部按钮区 ---
     if (hasFiles || deleting) {
@@ -575,6 +463,17 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             components::button(ui, "sel.inv").position(bx, curY).size(selBtnW, btnH).fontSize(fontSizeNormal)
                 .text("反选").disabled(ac::isBusy(st)).theme(themeTokens, false)
                 .onClick([&m]{ m.invertSelection(); }).build();
+            bx += selBtnW + gap;
+
+            // 保护内容按钮（有受保护文件时显示，点击弹窗查看/勾选）
+            if (protTotal > 0) {
+                float protBtnW = 120.0f * scale;
+                components::button(ui, "prot.btn").position(bx, curY).size(protBtnW, btnH).fontSize(fontSizeNormal)
+                    .text(std::string("\xE2\x9A\xA0 \xE4\xBF\x9D\xE6\x8A\xA4\xE5\x86\x85\xE5\xAE\xB9(") + std::to_string(protTotal) + ")")  // ⚠ 保护内容(N)
+                    .disabled(ac::isBusy(st)).theme(themeTokens, false)
+                    .onClick([page]{ page->protectedDlgOpen.set(true); })
+                    .build();
+            }
 
             if (selCount > 0) {
                 float dx = pad + contentW - delBtnW;
@@ -653,6 +552,156 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             .primaryText("确定")
             .onPrimary([page]{ page->deleteResultOpen.set(false); })
             .build();
+
+        // 保护内容对话框（分类树 + 可滚动 + 复选框勾选纳入删除）
+        {
+            float dlgW = std::min(screen.width * 0.86f, 780.0f);
+            float dlgH = std::min(screen.height * 0.85f, 560.0f);
+            components::dialog(ui, "protDlg")
+                .bindOpen(page->protectedDlgOpen)
+                .screen(screen.width, screen.height)
+                .size(dlgW, dlgH)
+                .title(std::string("\xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6"))  // 受保护文件
+                .content([&]() {
+                    // 内容区（dialog 面板内绝对布局）
+                    float cx = 24.0f, cy = 56.0f;
+                    float cw = dlgW - 48.0f;
+                    float ch = dlgH - 56.0f - 64.0f;  // 减标题和底部按钮
+                    auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);
+                    auto muted2 = lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
+                                            : theme::color(0.60f, 0.62f, 0.65f, 1.0f);
+                    // 构建分组数据（按 原因→应用/目录 两级）
+                    struct DirGroup { std::wstring dir; std::string app; std::vector<ArchiveFile> items; };
+                    std::vector<DirGroup> groups;
+                    std::unordered_map<std::wstring, size_t> gidx;
+                    std::vector<std::pair<std::string, std::vector<size_t>>> byReason;  // 原因 → 组索引
+                    {
+                        std::lock_guard<std::mutex> lk(m.filesMutex);
+                        for (const auto& pf : m.protectedFiles) {
+                            std::wstring dir = ac::path::parentDir(pf.path);
+                            auto it = gidx.find(dir);
+                            size_t idx;
+                            if (it == gidx.end()) {
+                                idx = groups.size();
+                                gidx[dir] = idx;
+                                DirGroup g;
+                                g.dir = dir;
+                                std::string app = detectAppName(dir);
+                                if (app.empty()) {
+                                    // 用目录名最后一段
+                                    size_t sep = dir.find_last_of(L'\\');
+                                    app = w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
+                                }
+                                g.app = app;
+                                groups.push_back(std::move(g));
+                            } else {
+                                idx = it->second;
+                            }
+                            groups[idx].items.push_back(pf);
+                            // 原因分类
+                            std::string reason;
+                            auto rit = m.protectedReasons.find(pf.path);
+                            if (rit != m.protectedReasons.end()) reason = rit->second;
+                            bool found = false;
+                            for (auto& br : byReason) {
+                                if (br.first == reason) { br.second.push_back(idx); found = true; break; }
+                            }
+                            if (!found) byReason.push_back({reason, {idx}});
+                        }
+                    }
+
+                    ui.stack("pd.content").position(cx, cy).size(cw, ch).content([&]{
+                        components::scrollView(ui, "pd.scroll")
+                            .size(cw, ch)
+                            .content([&](core::dsl::Ui& sui, float scw, float /*sch*/){
+                                // ⚠ 关键修复：必须用传入的 sui 创建元素（测量阶段用临时 Ui，否则测不出真实高度→不可滚动）
+                                sui.column("pd.col")
+                                    .width(scw)
+                                    .height(core::SizeValue::wrapContent())
+                                    .gap(3.0f)
+                                    .content([&]{
+                                        for (auto& br : byReason) {
+                                            // 一级：原因分类
+                                            sui.text("pd.r." + std::to_string(reinterpret_cast<size_t>(&br)))
+                                                .text(std::string("\xE2\x97\x8F ") + br.first)  // ●
+                                                .fontSize(14.0f)
+                                                .color(warnColor)
+                                                .build();
+                                            for (size_t ri = 0; ri < br.second.size(); ++ri) {
+                                                auto& g = groups[br.second[ri]];
+                                                std::string gid = "pd.g" + std::to_string(br.second[ri]);
+                                                bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
+                                                // 二级：应用/目录组头
+                                                sui.row(gid + ".h").width(scw).height(26.0f).gap(6.0f)
+                                                    .padding(16.0f, 0, 0, 0)
+                                                    .alignItems(core::Align::CENTER)
+                                                    .content([&]{
+                                                    sui.text(gid + ".arrow")
+                                                        .text(expanded ? "\xE2\x96\xBE" : "\xE2\x96\xB8")  // ▾ ▸
+                                                        .fontSize(12.0f)
+                                                        .color(muted2)
+                                                        .build();
+                                                    components::button(sui, gid + ".btn")
+                                                        .size(scw - 16.0f - 120.0f, 24.0f)
+                                                        .fontSize(12.0f)
+                                                        .text(g.app + std::string("  (") + std::to_string(g.items.size()) + std::string(")"))
+                                                        .theme(themeTokens, false)
+                                                        .onClick([page, dir = g.dir]{
+                                                            auto& v = page->expandedDirs;
+                                                            auto it2 = std::find(v.begin(), v.end(), dir);
+                                                            if (it2 != v.end()) v.erase(it2);
+                                                            else v.push_back(dir);
+                                                            app::requestUpdate();
+                                                        })
+                                                        .build();
+                                                    sui.text(gid + ".cnt")
+                                                        .width(110.0f).height(24.0f)
+                                                        .text(w2u(g.dir))
+                                                        .fontSize(9.0f)
+                                                        .color(muted2)
+                                                        .verticalAlign(core::VerticalAlign::Center)
+                                                        .build();
+                                                }).build();
+                                                // 三级：文件叶子
+                                                if (expanded) {
+                                                    for (size_t fi = 0; fi < g.items.size(); ++fi) {
+                                                        auto& pf = g.items[fi];
+                                                        std::string rid = gid + ".f" + std::to_string(fi);
+                                                        bool sel = m.selectedPaths.count(pf.path) > 0;
+                                                        bool failed = m.failedPaths.count(pf.path) > 0;
+                                                        bool last = (fi + 1 == g.items.size());
+                                                        std::string conn = last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ";  // └─ ├─
+                                                        sui.row(rid).width(scw).height(24.0f).gap(6.0f)
+                                                            .padding(44.0f, 0, 0, 0)
+                                                            .alignItems(core::Align::CENTER)
+                                                            .content([&]{
+                                                            sui.text(rid + ".c").text(conn).fontSize(11.0f).color(muted2).build();
+                                                            components::checkbox(sui, rid + ".k")
+                                                                .checked(sel)
+                                                                .theme(themeTokens)
+                                                                .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
+                                                                .build();
+                                                            std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
+                                                            if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;
+                                                            sui.text(rid + ".n").text(label).fontSize(11.0f)
+                                                                .color(failed ? warnColor
+                                                                     : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                                                                  : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
+                                                                .build();
+                                                        }).build();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }).build();
+                            })
+                            .build();
+                    }).build();
+                })
+                .primaryText(std::string("\xE5\x85\xB3\xE9\x97\xAD"))  // 关闭
+                .onPrimary([page]{ page->protectedDlgOpen.set(false); })
+                .build();
+        }
 
     })  // appRoot stack content 结束
     .build();  // appRoot stack 结束
