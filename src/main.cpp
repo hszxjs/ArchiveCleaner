@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <unordered_map>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -81,6 +83,7 @@ struct PageState {
     int deleteSel = 0;          // 删除方式：0=回收站, 1=永久（不用 Signal）
     int engineSel = -1;         // 引擎选择：0=Everything, 1=Win32（fdfind/MFT 保留代码但不暴露）
     int themeSel = 0;           // 主题：0=夜间, 1=日间
+    std::vector<std::wstring> expandedDirs;  // 受保护区展开的目录组
     // 删除确认对话框
     eui::Signal<bool> deleteConfirmOpen{false};
     int deleteConfirmCount = 0;
@@ -348,7 +351,41 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     bool deleting = ac::isDeleting(st);
     // 底部区域高度（按钮行 + 状态栏）
     float bottomH = btnH + fontSizeSmall + 2 * gap;
-    float listH = std::max(60.0f, screen.height - curY - bottomH - pad);
+    // 受保护文件分组数据（按目录分组，附原因）
+    struct ProtGroup {
+        std::wstring dir;
+        std::string reason;
+        std::vector<ArchiveFile> items;
+    };
+    std::vector<ProtGroup> protGroups;
+    {
+        std::lock_guard<std::mutex> lk(m.filesMutex);
+        std::unordered_map<std::wstring, size_t> groupIdx;
+        for (const auto& pf : m.protectedFiles) {
+            std::wstring dir = ac::path::parentDir(pf.path);
+            auto it = groupIdx.find(dir);
+            if (it == groupIdx.end()) {
+                groupIdx[dir] = protGroups.size();
+                ProtGroup g;
+                g.dir = dir;
+                auto rit = m.protectedReasons.find(pf.path);
+                g.reason = rit != m.protectedReasons.end() ? rit->second : "";
+                g.items.push_back(pf);
+                protGroups.push_back(std::move(g));
+            } else {
+                protGroups[it->second].items.push_back(pf);
+            }
+        }
+    }
+    size_t protTotal = 0;
+    for (auto& g : protGroups) protTotal += g.items.size();
+    // 受保护区高度（有内容时占用列表区的一部分）
+    float protH = 0.0f;
+    if (protTotal > 0) {
+        protH = std::min(200.0f * scale, (screen.height - curY - bottomH - pad) * 0.45f);
+    }
+    float listH = std::max(60.0f, screen.height - curY - bottomH - pad - protH
+                            - (protH > 0 ? gap : 0.0f));
     int64_t itemCount = 0;
     {
         std::lock_guard<std::mutex> lk(m.filesMutex);
@@ -397,6 +434,81 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         .build();
     }).build();  // fileList.wrap stack 结束
     curY += listH + gap;
+
+    // --- 受保护文件区（按目录分组，可展开，复选框默认不勾）---
+    if (protTotal > 0) {
+        auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);   // 橙色警示
+        ui.stack("prot.wrap").position(pad, curY).size(contentW, protH).content([&]{
+            components::scrollView(ui, "prot.scroll")
+                .size(contentW, protH)
+                .content([&](core::dsl::Ui& /*sui*/, float /*cw*/, float /*ch*/){
+                    ui.column("prot.col").size(contentW, protH).gap(gap * 0.5f).content([&]{
+                        // 标题行
+                        ui.text("prot.title")
+                            .text(std::string("\xE2\x9A\xA0 \xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6 ") // ⚠ 受保护文件
+                                  + std::to_string(protTotal)
+                                  + std::string(" \xE4\xB8\xAA\xEF\xBC\x88\xE7\xA8\x8B\xE5\xBA\x8F/\xE6\xB8\xB8\xE6\x88\x8F/\xE6\xBA\x90\xE7\xA0\x81\xEF\xBC\x8C\xE7\xA1\xAE\xE8\xAE\xA4\xE5\x90\x8E\xE5\x8F\xAF\xE5\x8B\xBE\xE9\x80\x89\xE5\x88\xA0\xE9\x99\xA4\xEF\xBC\x89")) // （程序/游戏/源码，确认后可勾选删除）
+                            .fontSize(fontSizeSmall)
+                            .color(warnColor)
+                            .build();
+
+                        for (size_t gi = 0; gi < protGroups.size(); ++gi) {
+                            auto& g = protGroups[gi];
+                            std::string gid = "prot.g" + std::to_string(gi);
+                            bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
+
+                            // 组头：目录路径 + 数量 + 原因 + 展开/收起箭头
+                            std::string header = (expanded ? "\xE2\x96\xBE " : "\xE2\x96\xB8 ")   // ▾ / ▸
+                                + w2u(g.dir)
+                                + std::string("  (") + std::to_string(g.items.size())
+                                + std::string(" \xE4\xB8\xAA \xC2\xB7 ") + g.reason + ")";
+                            components::button(ui, gid + ".head")
+                                .size(contentW, 22.0f * scale)
+                                .fontSize(fontSizeTiny)
+                                .text(header)
+                                .theme(themeTokens, false)
+                                .onClick([page, dir = g.dir]{
+                                    auto& v = page->expandedDirs;
+                                    auto it = std::find(v.begin(), v.end(), dir);
+                                    if (it != v.end()) v.erase(it);
+                                    else v.push_back(dir);
+                                    app::requestUpdate();
+                                })
+                                .build();
+
+                            // 展开时：文件行（复选框 + 文件名 + 大小）
+                            if (expanded) {
+                                for (size_t fi = 0; fi < g.items.size(); ++fi) {
+                                    auto& pf = g.items[fi];
+                                    std::string rid = gid + ".f" + std::to_string(fi);
+                                    bool sel = m.selectedPaths.count(pf.path) > 0;
+                                    bool failed = m.failedPaths.count(pf.path) > 0;
+                                    ui.row(rid).size(contentW - 16.0f * scale, rowH * 0.8f)
+                                        .padding(8.0f * scale, 2.0f * scale).gap(10.0f * scale).content([&]{
+                                        components::checkbox(ui, rid + ".chk")
+                                            .checked(sel)
+                                            .theme(themeTokens)
+                                            .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
+                                            .build();
+                                        std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
+                                        if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
+                                        ui.text(rid + ".name")
+                                            .text(label)
+                                            .fontSize(fontSizeTiny)
+                                            .color(failed ? warnColor
+                                                 : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                                              : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
+                                            .build();
+                                    }).build();
+                                }
+                            }
+                        }
+                    }).build();
+                })
+                .build();
+        }).build();
+        curY += protH + gap;
+    }
 
     // --- 底部按钮区 ---
     if (hasFiles || deleting) {
@@ -452,7 +564,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         std::string s = "扫描到 " + std::to_string(total) + " · 选中 " + std::to_string(sel) + " · 大小 " + ac::sizeHuman(selSize);
         int skipped = m.protectedSkipped.load();
         if (skipped > 0) {
-            s += " · 已跳过 " + std::to_string(skipped) + " 个程序/游戏文件";
+            s += " · 受保护文件 " + std::to_string(skipped) + " 个（见下方分组）";
         }
         if (ac::isDeleting(st)) {
             s = "删除中 · " + std::to_string(m.deleteDone.load()) + "/" + std::to_string(m.deleteTotal.load())

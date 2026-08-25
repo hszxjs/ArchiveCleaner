@@ -54,6 +54,9 @@ public:
 
     // === 文件列表（工作线程写、UI 读，必须加锁） ===
     std::vector<ArchiveFile> files;
+    // 受保护文件（程序/游戏/源码资源）：不进主列表，由用户在"受保护文件"区确认后可勾选删除
+    std::vector<ArchiveFile> protectedFiles;
+    std::unordered_map<std::wstring, std::string> protectedReasons;  // path → 原因（UTF-8）
     mutable std::mutex filesMutex;
     // UI 态独立存储（不污染 ArchiveFile）
     std::unordered_set<std::wstring> selectedPaths;

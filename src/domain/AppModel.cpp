@@ -38,6 +38,8 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
     {
         std::lock_guard<std::mutex> lk(filesMutex);
         files.clear();
+        protectedFiles.clear();
+        protectedReasons.clear();
         selectedPaths.clear();
         failedPaths.clear();
     }
@@ -54,47 +56,51 @@ void AppModel::launchScan(EngineType type, const std::wstring& folder, bool recu
                 engine = createEngine(EngineType::Walk, config);
                 degraded = true;
             }
-            // 目录风险检测缓存（本次扫描内有效；onFound 仅在单一工作线程顺序调用，无需加锁）
-            std::unordered_map<std::wstring, bool> dirCheckCache;
+            // 目录风险检测缓存：0=安全 1=含exe 2=项目标记（本次扫描内有效）
+            std::unordered_map<std::wstring, int> dirCheckCache;
             scanDegraded = degraded;
             scanDegradeReason = degradeReason;
             engine->run(folder, recursive, scanCancelFlag,
                 [this, folder, protect = config.protectProgramDirs,
                  &extraPatterns = config.customProtectedPatterns, &dirCheckCache]
                 (const ArchiveFile& af) {
+                    std::string reason;  // 非空 = 受保护
                     if (protect) {
-                        // 第 1 层：内置 + 自定义目录模式（mods/游戏/开发依赖目录）
                         if (isProtectedPath(af.path, extraPatterns)) {
-                            protectedSkipped++;
-                            return;
-                        }
-                        // 第 2 层：注册表安装路径（国产游戏的自定义安装目录）
-                        if (path::startsWithAny(af.path, path::installedProgramDirs())) {
-                            protectedSkipped++;
-                            return;
-                        }
-                        // 第 3+5 层：目录内容检测（含缓存，同目录多个文件只查一次）。
-                        //   exe 同目录 = 绿色版游戏资源；项目标记 = 源码项目目录。
-                        //   扫描根目录本身豁免（用户明确扫的根目录不拦）。
-                        std::wstring parent = path::parentDir(af.path);
-                        if (!parent.empty() && parent != folder) {
-                            auto it = dirCheckCache.find(parent);
-                            bool risky;
-                            if (it != dirCheckCache.end()) {
-                                risky = it->second;
-                            } else {
-                                risky = path::dirContainsExe(parent)
-                                      || path::dirContainsProjectMarker(parent);
-                                dirCheckCache[parent] = risky;
-                            }
-                            if (risky) {
-                                protectedSkipped++;
-                                return;
+                            reason = "\xE4\xBF\x9D\xE6\x8A\xA4\xE7\x9B\xAE\xE5\xBD\x95";           // 保护目录
+                        } else if (path::startsWithAny(af.path, path::installedProgramDirs())) {
+                            reason = "\xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x85\xE7\xA8\x8B\xE5\xBA\x8F"; // 已安装程序
+                        } else {
+                            std::wstring parent = path::parentDir(af.path);
+                            if (!parent.empty() && parent != folder) {
+                                auto it = dirCheckCache.find(parent);
+                                int risky;
+                                if (it != dirCheckCache.end()) {
+                                    risky = it->second;
+                                } else {
+                                    risky = path::dirContainsExe(parent) ? 1
+                                          : (path::dirContainsProjectMarker(parent) ? 2 : 0);
+                                    dirCheckCache[parent] = risky;
+                                }
+                                if (risky == 1) {
+                                    reason = "\xE6\xB8\xB8\xE6\x88\x8F/\xE7\xA8\x8B\xE5\xBA\x8F\xE7\x9B\xAE\xE5\xBD\x95"; // 游戏/程序目录
+                                } else if (risky == 2) {
+                                    reason = "\xE6\xBA\x90\xE7\xA0\x81\xE9\xA1\xB9\xE7\x9B\xAE";   // 源码项目
+                                }
                             }
                         }
                     }
-                    std::lock_guard<std::mutex> lk(filesMutex);
-                    files.push_back(af);
+                    if (!reason.empty()) {
+                        protectedSkipped++;
+                        std::lock_guard<std::mutex> lk(filesMutex);
+                        protectedFiles.push_back(af);
+                        protectedReasons[af.path] = reason;
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(filesMutex);
+                        files.push_back(af);
+                    }
                 },
                 [this](int d, int f) {
                     // 工作线程：更新进度原子量
@@ -136,11 +142,16 @@ void AppModel::cancelScan() {
 void AppModel::startDelete(bool permanent, DeleteDoneCallback doneCb) {
     if (isBusy(state)) return;
 
-    // 收集选中文件（拷贝，避免与 UI 数据竞争）
+    // 收集选中文件（普通列表 + 受保护列表，拷贝避免数据竞争）
     std::vector<ArchiveFile> toDelete;
     {
         std::lock_guard<std::mutex> lk(filesMutex);
         for (const auto& f : files) {
+            if (selectedPaths.count(f.path)) {
+                toDelete.push_back(f);
+            }
+        }
+        for (const auto& f : protectedFiles) {
             if (selectedPaths.count(f.path)) {
                 toDelete.push_back(f);
             }
@@ -261,8 +272,14 @@ void AppModel::applyDeleteResults(const std::vector<DeleteResult>& results) {
         std::remove_if(files.begin(), files.end(),
             [&](const ArchiveFile& f) { return okPaths.count(f.path) > 0; }),
         files.end());
-    // 成功项的选中态也清掉
-    for (const auto& p : okPaths) selectedPaths.erase(p);
+    protectedFiles.erase(
+        std::remove_if(protectedFiles.begin(), protectedFiles.end(),
+            [&](const ArchiveFile& f) { return okPaths.count(f.path) > 0; }),
+        protectedFiles.end());
+    for (const auto& p : okPaths) {
+        selectedPaths.erase(p);
+        protectedReasons.erase(p);
+    }
 }
 
 void AppModel::updateScanElapsed() {
