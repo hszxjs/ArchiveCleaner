@@ -126,40 +126,41 @@ struct PageState {
     // 弹窗列表的扁平化行模型：只在数据变化时重建（展开/收起、打开弹窗），
     // compose 每帧只读不建——杜绝测量/渲染两遍 ID 不一致导致的错位
     struct ProtRow {
-        int kind = 0;            // 0=原因标题 1=目录组 2=文件
+        int kind = 0;            // 0=原因 1=软件 2=文件路径 3=文件
         std::string reason;      // kind 0
-        std::wstring dir;        // kind 1（文件父目录，展开/收起的 key）
-        std::string app;         // kind 1（软件显示名）
-        int count = 0;           // kind 1
-        std::wstring dispDir;    // kind 1（右侧展示的目录：软件根目录优先，比深层路径短且可读）
-        std::wstring path;       // kind 2
-        std::string label;       // kind 2
-        bool failed = false;     // kind 2
-        bool last = false;       // kind 2：是否组内最后一个（└─ / ├─）
+        std::string app;         // kind 1 软件显示名
+        std::string key;         // kind 1 展开 key（原因+软件名）
+        int count = 0;           // kind 1/2 该组文件数
+        std::wstring dir;        // kind 2 文件所在目录（展开 key + 展示）
+        std::wstring path;       // kind 3 文件完整路径
+        std::string label;       // kind 3 显示文字（名称·大小）
+        bool failed = false;     // kind 3
+        bool last = false;       // kind 3 路径组内最后（└─ / ├─）
     };
     std::vector<ProtRow> protRows;
+    std::vector<std::string> expandedApps;  // 已展开的软件组 key（原因+软件名）
 };
 
 // 识别受保护目录所属软件的显示名（弹窗分组标题，让用户一眼认出软件）：
 // ① 关键词（steamapps/minecraft/node_modules 等精确规则）
 // ② findAppIdentity：向上找 exe 读版本资源名 / 反查注册表 DisplayName / 有意义目录段
-static std::string resolveAppName(const std::wstring& dir, std::wstring& dispDir) {
+static std::string resolveAppName(const std::wstring& dir) {
     std::string app = detectAppName(dir);
     if (!app.empty()) return app;
     ac::path::AppIdentity id = ac::path::findAppIdentity(dir);
-    if (!id.name.empty()) {
-        if (!id.root.empty()) dispDir = id.root;
-        return w2u(id.name);
-    }
+    if (!id.name.empty()) return w2u(id.name);
     size_t sep = dir.find_last_of(L'\\');
     return w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
 }
 
-// 重建保护内容弹窗的行模型（原因 → 应用/目录 → 文件 三级拍平成一级）
+// 重建保护内容弹窗的行模型。
+// 树状结构（拍平成一级行数组，virtualList 统一渲染）：
+//   ● 原因 → ▸ 软件名(总数) → ▸ 文件路径(数) → ├─/└─ 文件名
+// 同一软件名下的多个路径合并为一个软件组。
 static void rebuildProtRows(app::PageState* page) {
     auto& m = g_model;
     page->protRows.clear();
-    struct DirGroup { std::wstring dir; std::wstring dispDir; std::string app; std::vector<ArchiveFile> items; };
+    struct DirGroup { std::wstring dir; std::string app; std::vector<ArchiveFile> items; };
     std::vector<std::pair<std::string, std::vector<DirGroup>>> byReason;
     // 全程持锁：protectedFiles / protectedReasons / failedPaths 共用 filesMutex
     std::lock_guard<std::mutex> lk(m.filesMutex);
@@ -179,8 +180,7 @@ static void rebuildProtRows(app::PageState* page) {
         if (!g) {
             DirGroup ng;
             ng.dir = dir;
-            ng.dispDir = dir;
-            ng.app = resolveAppName(dir, ng.dispDir);
+            ng.app = resolveAppName(dir);
             for (auto& br : byReason) {
                 if (br.first == reason) { br.second.push_back(std::move(ng)); g = &br.second.back(); break; }
             }
@@ -188,23 +188,55 @@ static void rebuildProtRows(app::PageState* page) {
         }
         g->items.push_back(pf);
     }
+    // 原因 → 软件组（同软件名的多个目录合并） → 路径 → 文件
+    struct AppGroup { std::string app; std::string key; std::vector<DirGroup*> dirs; int total = 0; };
     for (auto& br : byReason) {
-        page->protRows.push_back({0, br.first, {}, {}, 0, {}, {}, {}, false});
+        PageState::ProtRow r0;
+        r0.kind = 0;
+        r0.reason = br.first;
+        page->protRows.push_back(r0);
+        std::vector<AppGroup> apps;
         for (auto& g : br.second) {
-            bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir)
-                            != page->expandedDirs.end();
-            page->protRows.push_back({1, {}, g.dir, g.app, (int)g.items.size(), g.dispDir, {}, {}, false});
-            if (!expanded) continue;
-            for (size_t fi = 0; fi < g.items.size(); ++fi) {
-                auto& pf = g.items[fi];
-                std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
-                bool failedFlag = false;
-                if (m.failedPaths.count(pf.path) > 0) {
-                    label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
-                    failedFlag = true;
+            std::string key = br.first + "\x01" + g.app;
+            AppGroup* a = nullptr;
+            for (auto& cand : apps)
+                if (cand.key == key) { a = &cand; break; }
+            if (!a) { apps.push_back({g.app, key, {}, 0}); a = &apps.back(); }
+            a->dirs.push_back(&g);
+            a->total += (int)g.items.size();
+        }
+        for (auto& a : apps) {
+            bool appOpen = std::find(page->expandedApps.begin(), page->expandedApps.end(), a.key)
+                           != page->expandedApps.end();
+            PageState::ProtRow r1;
+            r1.kind = 1;
+            r1.app = a.app;
+            r1.key = a.key;
+            r1.count = a.total;
+            page->protRows.push_back(r1);
+            if (!appOpen) continue;
+            for (auto* g : a.dirs) {
+                bool dirOpen = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g->dir)
+                               != page->expandedDirs.end();
+                PageState::ProtRow r2;
+                r2.kind = 2;
+                r2.dir = g->dir;
+                r2.count = (int)g->items.size();
+                page->protRows.push_back(r2);
+                if (!dirOpen) continue;
+                for (size_t fi = 0; fi < g->items.size(); ++fi) {
+                    auto& pf = g->items[fi];
+                    PageState::ProtRow r3;
+                    r3.kind = 3;
+                    r3.path = pf.path;
+                    r3.label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
+                    if (m.failedPaths.count(pf.path) > 0) {
+                        r3.label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + r3.label;  // [失败]
+                        r3.failed = true;
+                    }
+                    r3.last = fi + 1 == g->items.size();
+                    page->protRows.push_back(r3);
                 }
-                page->protRows.push_back({2, {}, {}, {}, 0, {}, pf.path, label, failedFlag,
-                                          fi + 1 == g.items.size()});
             }
         }
     }
@@ -719,65 +751,92 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                             rui.text(rowId + ".t").text(r.reason)
                                                 .fontSize(fontSizeSmall).color(warnColor).build();
                                         }).build();
-                                } else if (r.kind == 1) {
-                                    // 二级：应用/目录组头（整行可点，展开/收起）
-                                    std::wstring gdir = r.dir;
-                                    bool expanded = std::find(page->expandedDirs.begin(),
-                                                              page->expandedDirs.end(), gdir)
-                                                    != page->expandedDirs.end();
+                                } else if (r.kind == 1 || r.kind == 2) {
+                                    // 二级：软件组头 / 三级：文件路径行（整行可点，展开/收起）
+                                    // 只捕获平凡类型（指针+行号），点击时再查表——闭包存储非平凡捕获在此深度编译不过
+                                    int kind = r.kind;
+                                    float padL = (kind == 1 ? 14.0f : 34.0f) * scale;
+                                    bool expanded = false;
+                                    if (kind == 1) {
+                                        expanded = std::find(page->expandedApps.begin(),
+                                                             page->expandedApps.end(), r.key)
+                                                   != page->expandedApps.end();
+                                    } else {
+                                        expanded = std::find(page->expandedDirs.begin(),
+                                                             page->expandedDirs.end(), r.dir)
+                                                   != page->expandedDirs.end();
+                                    }
                                     rui.stack(rowId).size(w, h).content([&]{
                                         rui.rect(rowId + ".hit").size(w, h)
                                             .states(theme::color(0.0f, 0.0f, 0.0f, 0.0f),
                                                     themeTokens.surfaceHover,
                                                     themeTokens.surfaceHover)
                                             .radius(6.0f * scale)
-                                            // 只捕获平凡类型（指针+行号），点击时再查表——闭包存储非平凡捕获在此深度编译不过
-                                            .onClick([page, gi = index]{
+                                            .onClick([page, kind, gi = index]{
                                                 if (gi < 0 || gi >= (int64_t)page->protRows.size()) return;
-                                                if (page->protRows[(size_t)gi].kind != 1) return;
-                                                std::wstring dir = page->protRows[(size_t)gi].dir;
-                                                auto& v = page->expandedDirs;
-                                                auto it = std::find(v.begin(), v.end(), dir);
-                                                if (it != v.end()) v.erase(it);
-                                                else v.push_back(dir);
+                                                if (page->protRows[(size_t)gi].kind != kind) return;
+                                                if (kind == 1) {
+                                                    std::string key = page->protRows[(size_t)gi].key;
+                                                    auto& v = page->expandedApps;
+                                                    auto it = std::find(v.begin(), v.end(), key);
+                                                    if (it != v.end()) v.erase(it);
+                                                    else v.push_back(key);
+                                                } else {
+                                                    std::wstring dir = page->protRows[(size_t)gi].dir;
+                                                    auto& v = page->expandedDirs;
+                                                    auto it = std::find(v.begin(), v.end(), dir);
+                                                    if (it != v.end()) v.erase(it);
+                                                    else v.push_back(dir);
+                                                }
                                                 rebuildProtRows(page);
                                                 app::requestUpdate();
                                             })
                                             .build();
-                                        float padL = 14.0f * scale, padR = 10.0f * scale;
+                                        float padR = 10.0f * scale;
                                         float arrowW = 14.0f * scale, gap2 = 8.0f * scale;
-                                        float nameW = w * 0.42f;
-                                        float pathW = std::max(60.0f * scale,
-                                                               w - padL - padR - arrowW - gap2 - nameW - gap2);
                                         rui.text(rowId + ".a").position(padL, 0).size(arrowW, h)
                                             .text(expanded ? "\xE2\x96\xBE" : "\xE2\x96\xB8")  // ▾ ▸
                                             .fontSize(fontSizeSmall).color(muted2)
                                             .horizontalAlign(core::HorizontalAlign::Center)
                                             .verticalAlign(core::VerticalAlign::Center)
                                             .build();
-                                        rui.text(rowId + ".n")
-                                            .position(padL + arrowW + gap2, 0).size(nameW, h)
-                                            .text(r.app + " (" + std::to_string(r.count) + ")")
-                                            .fontSize(fontSizeNormal).color(nameColor)
-                                            .verticalAlign(core::VerticalAlign::Center)
-                                            .build();
-                                        rui.text(rowId + ".p")
-                                            .position(w - padR - pathW, 0).size(pathW, h)
-                                            .text(w2u(r.dispDir.empty() ? gdir : r.dispDir))
-                                            .fontSize(fontSizeTiny).color(muted2)
-                                            .horizontalAlign(core::HorizontalAlign::Right)
-                                            .verticalAlign(core::VerticalAlign::Center)
-                                            .build();
+                                        if (kind == 1) {
+                                            // 软件名 + 文件总数
+                                            rui.text(rowId + ".n")
+                                                .position(padL + arrowW + gap2, 0)
+                                                .size(std::max(60.0f * scale, w - padL - padR - arrowW - gap2), h)
+                                                .text(r.app + " (" + std::to_string(r.count) + ")")
+                                                .fontSize(fontSizeNormal).color(nameColor)
+                                                .verticalAlign(core::VerticalAlign::Center)
+                                                .build();
+                                        } else {
+                                            // 文件路径 + 数量（路径即位置，右对齐数量）
+                                            float cntW = 64.0f * scale;
+                                            rui.text(rowId + ".p")
+                                                .position(padL + arrowW + gap2, 0)
+                                                .size(std::max(60.0f * scale, w - padL - padR - arrowW - gap2 - cntW - gap2), h)
+                                                .text(w2u(r.dir))
+                                                .fontSize(fontSizeSmall).color(muted2)
+                                                .verticalAlign(core::VerticalAlign::Center)
+                                                .build();
+                                            rui.text(rowId + ".c")
+                                                .position(w - padR - cntW, 0).size(cntW, h)
+                                                .text("(" + std::to_string(r.count) + ")")
+                                                .fontSize(fontSizeSmall).color(muted2)
+                                                .horizontalAlign(core::HorizontalAlign::Right)
+                                                .verticalAlign(core::VerticalAlign::Center)
+                                                .build();
+                                        }
                                     }).build();
                                 } else {
-                                    // 三级：文件行（连接符 + 复选框 + 名称·大小）
+                                    // 四级：文件行（连接符 + 复选框 + 名称·大小）
                                     bool sel = false;
                                     {
                                         std::lock_guard<std::mutex> lk(m.filesMutex);
                                         sel = m.selectedPaths.count(r.path) > 0;
                                     }
                                     rui.row(rowId).size(w, h)
-                                        .padding(40.0f * scale, 0, 10.0f * scale, 0).gap(8.0f * scale)
+                                        .padding(54.0f * scale, 0, 10.0f * scale, 0).gap(8.0f * scale)
                                         .alignItems(core::Align::CENTER).content([&]{
                                             rui.text(rowId + ".c")
                                                 .text(r.last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ")  // └─ ├─
@@ -787,7 +846,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                                 .theme(rowTheme)
                                                 .onChange([&m, page, fi = index](bool v){
                                                     if (fi < 0 || fi >= (int64_t)page->protRows.size()) return;
-                                                    if (page->protRows[(size_t)fi].kind != 2) return;
+                                                    if (page->protRows[(size_t)fi].kind != 3) return;
                                                     m.toggleSelect(page->protRows[(size_t)fi].path);
                                                 })
                                                 .build();
