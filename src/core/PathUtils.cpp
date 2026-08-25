@@ -287,6 +287,10 @@ bool isGenericSegment(const std::wstring& seg) {
         L"log", L"logs", L"output", L"out", L"pack", L"packs", L"patch",
         L"patches", L"userdata", L"user", L"content", L"media", L"image",
         L"images", L"img", L"video", L"videos", L"audio", L"sound",
+        L"pool", L"addons", L"addon", L"webres", L"themes", L"theme",
+        L"locale", L"locales", L"lang", L"langs", L"dict", L"dicts",
+        L"win-i386", L"win-x64", L"win32", L"x64", L"x86", L"i386",
+        L"driver", L"drivers",
     };
     for (const auto* g : generic) {
         if (_wcsicmp(seg.c_str(), g) == 0) return true;
@@ -294,7 +298,8 @@ bool isGenericSegment(const std::wstring& seg) {
     return false;
 }
 
-// 版本号样式目录段：1.1.0.2264 / 2024.6 / 3.2 之类
+// 版本号样式目录段：
+//  纯版本号（1.1.0.2264 / 2024.6）或 组件_版本（addsignature_3.1.0.1 / foo-95）
 bool isVersionSegment(const std::wstring& seg) {
     int dots = 0, digits = 0, others = 0;
     for (wchar_t c : seg) {
@@ -302,7 +307,31 @@ bool isVersionSegment(const std::wstring& seg) {
         if (iswdigit(c)) { ++digits; continue; }
         ++others;
     }
-    return digits > 0 && others == 0 && dots > 0;  // 至少一个点，纯数字
+    if (digits > 0 && others == 0 && dots > 0) return true;   // 纯数字带点
+    // 组件名_数字(.数字)* —— 最后一个 _ 或 - 之后是纯数字（可带点）
+    size_t sep = seg.find_last_of(L"_-");
+    if (sep != std::wstring::npos && sep + 1 < seg.size() && sep > 0) {
+        bool tailNum = true;
+        int tailDots = 0, tailDigits = 0, tailOthers = 0;
+        for (size_t i = sep + 1; i < seg.size(); ++i) {
+            wchar_t c = seg[i];
+            if (c == L'.') { ++tailDots; continue; }
+            if (iswdigit(c)) { ++tailDigits; continue; }
+            tailNum = false;
+            break;
+        }
+        if (tailNum && tailDigits > 0) return true;           // addsignature_3.1.0.1 / foo-95
+    }
+    // 名字.数字 —— 最后一个 . 之后是纯数字（knewdocs_master.95 / build.20240101）
+    size_t dot = seg.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot > 0 && dot + 1 < seg.size()) {
+        bool tailNum = true;
+        for (size_t i = dot + 1; i < seg.size(); ++i) {
+            if (!iswdigit(seg[i])) { tailNum = false; break; }
+        }
+        if (tailNum) return true;
+    }
+    return false;
 }
 
 // 公共/系统目录：其中的 exe（安装器残留、系统组件）不归属任何具体软件，

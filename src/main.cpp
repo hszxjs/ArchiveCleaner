@@ -87,6 +87,7 @@ static std::string detectAppName(const std::wstring& path) {
     }
     if (has(L"\\.minecraft\\")) return "Minecraft";
     if (has(L"\\node_modules\\")) return "npm \xE4\xBE\x9D\xE8\xB5\x96";                    // npm 依赖
+    if (has(L"kingsoft") || has(L"\\wps cloud")) return "WPS Office";                        // WPS（程序在 Local，插件包在 Roaming）
     if (has(L"genshin") || has(L"\xE5\x8E\x9F\xE7\xA5\x9E")) return "\xE5\x8E\x9F\xE7\xA5\x9E";  // 原神
     if (has(L"\\wegame\\")) return "WeGame";
     if (has(L"\\steam\\")) return "Steam";
