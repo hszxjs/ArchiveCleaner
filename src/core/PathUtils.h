@@ -58,10 +58,10 @@ bool dirContainsExe(const std::wstring& dir);
 
 // 应用识别结果：root=软件根目录（用于展示），name=给用户看的显示名
 struct AppIdentity {
-    enum Source { None = 0, Exe, Registry, PathSegment };
+    enum Source { None = 0, Exe, Registry, ProgramFiles, PathSegment };
     std::wstring root;
     std::wstring name;
-    Source source = None;  // Exe/Registry=确凿软件名；PathSegment=目录段兜底（弱）
+    Source source = None;  // Exe/Registry/ProgramFiles=确凿软件名；PathSegment=目录段兜底（弱）
 };
 
 // exe 版本资源显示名：FileDescription → ProductName → 空（正规软件都填了中文显示名）

@@ -340,10 +340,24 @@ bool isSharedAncestor(const std::wstring& dir) {
 
 AppIdentity findAppIdentity(const std::wstring& fileDir) {
     // ① 向上找 exe（最多 4 级），读版本资源显示名——最具体。
-    //    碰到公共/系统目录立即停手，防止错认给无关 exe（如 Temp 里的安装器残留）
+    //    碰到公共/系统目录立即停手，防止错认给无关 exe（如 Temp 里的安装器残留）。
+    //    例外：Program Files 的直接子目录是规范的软件安装目录，按强识别处理。
+    std::wstring prev = fileDir;  // 最后一个非公共祖先
     std::wstring ancestor = fileDir;
     for (int level = 0; level < 4 && ancestor.size() > 3; ++level) {
-        if (isSharedAncestor(ancestor)) break;
+        if (isSharedAncestor(ancestor)) {
+            std::wstring lower;
+            for (wchar_t c : ancestor) lower.push_back(static_cast<wchar_t>(::towlower(c)));
+            if (lower.back() != L'\\') lower.push_back(L'\\');
+            bool pf = lower.size() >= 15
+                      && (lower.compare(lower.size() - 15, 15, L"\\program files\\") == 0
+                          || (lower.size() >= 21
+                              && lower.compare(lower.size() - 21, 21, L"\\program files (x86)\\") == 0));
+            if (pf && prev != ancestor) {
+                return {prev, fileName(prev), AppIdentity::ProgramFiles};
+            }
+            break;
+        }
         std::wstring exe = firstExeInDir(ancestor);
         if (!exe.empty()) {
             std::wstring name = exeDisplayName(exe);
@@ -356,6 +370,7 @@ AppIdentity findAppIdentity(const std::wstring& fileDir) {
         }
         std::wstring up = parentDir(ancestor);
         if (up == ancestor || up.empty()) break;
+        prev = ancestor;
         ancestor = up;
     }
     // ② 反查注册表 InstallLocation（取最长匹配，子目录归属最具体的软件）
