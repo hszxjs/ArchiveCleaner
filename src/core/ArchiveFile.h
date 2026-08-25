@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cwctype>
 #include <vector>
+#include <set>
 
 namespace ac {
 
@@ -60,6 +61,30 @@ inline bool isProtectedPath(const std::wstring& normalizedPath,
         if (lower.find(p) != std::wstring::npos) return true;
     }
     return false;
+}
+
+// === 扫描格式开关（用户可在"扫描目标"弹窗中勾选，进程级全局，启动时从 Config 加载）===
+// 存"被禁用"的 key（空 = 全部启用）。key = 小写扩展名，或分卷组键：
+//   "zvol" = ZIP 分卷 .z01-.z99；"rvol" = RAR 分卷 .r00-.r99；"nvol" = 数字序号分卷 xxx.zip.001
+inline std::set<std::string>& scanDisabledKeys() {
+    static std::set<std::string> s;
+    return s;
+}
+inline bool scanKeyEnabled(const std::string& key) {
+    return scanDisabledKeys().find(key) == scanDisabledKeys().end();
+}
+// 扩展名 → 开关 key（分卷扩展名归并到组键）
+inline std::string scanKeyOf(const std::string& lowerExt) {
+    auto isDigits = [](const std::string& s) {
+        for (char c : s) if (c < '0' || c > '9') return false;
+        return true;
+    };
+    if (lowerExt.size() == 3 && lowerExt[0] == 'z' && isDigits(lowerExt.substr(1))) return "zvol";
+    if (lowerExt.size() == 3 && lowerExt[0] == 'r' && isDigits(lowerExt.substr(1))) return "rvol";
+    return lowerExt;
+}
+inline bool extScanEnabled(const std::string& lowerExt) {
+    return scanKeyEnabled(scanKeyOf(lowerExt));
 }
 
 // 压缩包扩展名白名单（不含点，全小写）。
@@ -133,14 +158,15 @@ struct ArchiveFile {
         if (i == std::wstring::npos) return false;
         std::string last = toLowerAscii(fileName.substr(i + 1));
 
-        // 快速路径：标准扩展名或分卷专用扩展名直接查表
+        // 快速路径：标准扩展名或分卷专用扩展名直接查表（同时受用户格式开关约束）
         for (const auto& x : archiveExts()) {
-            if (last == x) return true;
+            if (last == x) return extScanEnabled(last);
         }
 
-        // 慢路径：数字序号（如 "001"），检查倒数第二段是否是压缩格式
+        // 慢路径：数字序号（如 "001"），检查倒数第二段是否是压缩格式（独立开关）
         if (last.size() == 3 && last[0] >= '0' && last[0] <= '9'
             && last[1] >= '0' && last[1] <= '9' && last[2] >= '0' && last[2] <= '9') {
+            if (!scanKeyEnabled("nvol")) return false;
             std::wstring base = fileName.substr(0, i);
             size_t j = base.find_last_of(L'.');
             if (j == std::wstring::npos) return false;

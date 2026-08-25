@@ -81,6 +81,7 @@ std::pair<bool, std::wstring> FdEngine::run(
     // 传空字符串 "" 会被 fd 当作空正则，匹配 0 个文件
     std::wstring args;
     for (const auto& e : archiveExts()) {
+        if (!extScanEnabled(e)) continue;  // 用户禁用的格式不传给 fd
         args += L"-e " + utf8ToW(e) + L" ";
     }
     args += L"-a --no-ignore --hidden";

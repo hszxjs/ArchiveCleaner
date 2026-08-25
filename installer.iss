@@ -3,13 +3,13 @@
 
 [Setup]
 AppName=ArchiveCleaner
-AppVersion=1.0.0
+AppVersion=1.1.0
 AppPublisher=ArchiveCleaner
 DefaultDirName={commonpf}\ArchiveCleaner
 DefaultGroupName=ArchiveCleaner
 DisableProgramGroupPage=yes
 OutputDir=A:\ArchiveCleaner
-OutputBaseFilename=ArchiveCleaner-Setup-v1.0
+OutputBaseFilename=ArchiveCleaner-Setup-v1.1
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible

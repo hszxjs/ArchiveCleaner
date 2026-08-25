@@ -24,6 +24,8 @@ struct Config {
     bool protectProgramDirs = true;
     // 用户自定义保护路径模式（小写、两侧带反斜杠，如 L"\\genshin impact\\"）
     std::vector<std::wstring> customProtectedPatterns;
+    // 扫描目标：被禁用的格式 key（扩展名或分卷组键 zvol/rvol/nvol，空 = 全部启用）
+    std::vector<std::string> scanDisabled;
 
     bool permanentDelete() const {
         return deleteMode.rfind("\xE6\xB0\xB8\xE4\xB9\x85\xE5\x88\xA0\xE9\x99\xA4", 0) == 0;  // "永久删除"

@@ -17,6 +17,10 @@ AppModel::AppModel() {
 
 void AppModel::loadConfig() {
     config = Config::load();
+    // 扫描格式开关同步到核心层全局（isArchiveExt 过滤用）
+    auto& dis = scanDisabledKeys();
+    dis.clear();
+    for (const auto& k : config.scanDisabled) dis.insert(k);
 }
 
 void AppModel::saveConfig() {

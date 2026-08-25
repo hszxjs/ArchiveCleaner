@@ -126,6 +126,28 @@ Config Config::load() {
     c.includeSubfolders = extractBool(json, "include_subfolders", true);
     c.lastScanPath      = utf8ToW(extractString(json, "last_scan_path"));
     c.protectProgramDirs = extractBool(json, "protect_program_dirs", true);
+    // 扫描目标禁用格式："scan_disabled": ["rar", "iso", "zvol"]
+    {
+        std::string needle = "\"scan_disabled\"";
+        size_t k = json.find(needle);
+        if (k != std::string::npos) {
+            size_t open = json.find('[', k);
+            size_t close = json.find(']', open);
+            if (open != std::string::npos && close != std::string::npos) {
+                std::string arr = json.substr(open + 1, close - open - 1);
+                size_t pos = 0;
+                while (pos < arr.size()) {
+                    size_t q1 = arr.find('"', pos);
+                    if (q1 == std::string::npos) break;
+                    size_t q2 = arr.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    std::string item = arr.substr(q1 + 1, q2 - q1 - 1);
+                    if (!item.empty()) c.scanDisabled.push_back(item);
+                    pos = q2 + 1;
+                }
+            }
+        }
+    }
     // 自定义保护模式：简化解析 "custom_protected": ["\\path1\\", "\\path2\\"]
     {
         std::string needle = "\"custom_protected\"";
@@ -168,6 +190,12 @@ bool Config::save() const {
     f << "    \"delete_mode\": \""        << escapeJson(deleteMode) << "\",\n";
     f << "    \"include_subfolders\": "   << (includeSubfolders ? "true" : "false") << ",\n";
     f << "    \"protect_program_dirs\": " << (protectProgramDirs ? "true" : "false") << ",\n";
+    f << "    \"scan_disabled\": [";
+    for (size_t i = 0; i < scanDisabled.size(); ++i) {
+        if (i) f << ", ";
+        f << "\"" << escapeJson(scanDisabled[i]) << "\"";
+    }
+    f << "],\n";
     f << "    \"custom_protected\": [";
     for (size_t i = 0; i < customProtectedPatterns.size(); ++i) {
         if (i) f << ", ";

@@ -125,7 +125,17 @@ struct PageState {
     // 保护内容对话框
     eui::Signal<bool> protectedDlgOpen{false};
     eui::Signal<float> protScroll{0.0f};   // 弹窗内列表滚动偏移
-    // 弹窗列表的扁平化行模型：只在数据变化时重建（展开/收起、打开弹窗），
+    // 扫描目标对话框（格式勾选）
+    eui::Signal<bool> scanExtDlgOpen{false};
+    eui::Signal<float> extScroll{0.0f};
+    struct ExtEntry { std::string key; std::string label; };   // key=开关键, label=".zip"
+    struct ExtRow {
+        int kind = 0;                       // 0=节标题 1=格式格（≤4 个/行） 2=分卷开关
+        std::string title;                  // kind 0/2
+        std::vector<int> entries;           // kind 1/2：extEntries 下标
+    };
+    std::vector<ExtEntry> extEntries;       // 首次打开弹窗时构建一次
+    std::vector<ExtRow> extRows;    // 弹窗列表的扁平化行模型：只在数据变化时重建（展开/收起、打开弹窗），
     // compose 每帧只读不建——杜绝测量/渲染两遍 ID 不一致导致的错位
     struct ProtRow {
         int kind = 0;            // 0=原因 1=软件 2=文件路径 3=文件
@@ -328,6 +338,61 @@ static void rebuildMainRows(app::PageState* page) {
             page->mainRows.push_back(std::move(r1));
         }
     }
+}
+
+// 构建"扫描目标"弹窗的行模型（节标题 + 每行 4 个格式格 + 分卷开关），只在首次打开时构建
+static void buildScanExtRows(app::PageState* page) {
+    page->extEntries.clear();
+    page->extRows.clear();
+    auto addSection = [&](const char* title8) {
+        PageState::ExtRow r;
+        r.kind = 0;
+        r.title = title8;
+        page->extRows.push_back(r);
+    };
+    auto addGrid = [&](const std::vector<const char*>& exts) {
+        PageState::ExtRow row;
+        row.kind = 1;
+        for (const char* e : exts) {
+            std::string key = e;
+            page->extEntries.push_back({key, std::string(".") + key});
+            row.entries.push_back((int)page->extEntries.size() - 1);
+            if (row.entries.size() == 4) {
+                page->extRows.push_back(row);
+                row.entries.clear();
+            }
+        }
+        if (!row.entries.empty()) page->extRows.push_back(row);
+    };
+    addSection("\xE6\xA0\x87\xE5\x87\x86\xE5\x8E\x8B\xE7\xBC\xA9\xE6\xA0\xBC\xE5\xBC\x8F");  // 标准压缩格式
+    addGrid({"zip", "rar", "7z", "tar", "gz", "bz2", "tgz", "xz", "iso", "cab",
+             "z", "lz", "lzma", "tbz2", "zst", "lz4", "br", "bz"});
+    addSection("\xE5\xB0\x81\xE8\xA3\x85\x2F\xE6\x89\x93\xE5\x8C\x85\xE6\xA0\xBC\xE5\xBC\x8F");  // 封装/打包格式
+    addGrid({"jar", "war", "ear", "apk", "xapk", "wim", "rpm", "deb",
+             "arj", "lzh", "ace", "arc", "pak", "cpio", "squashfs"});
+    addSection("\xE5\x88\x86\xE5\x8D\xB7\xE6\xA0\xBC\xE5\xBC\x8F");  // 分卷格式
+    const std::pair<const char*, const char*> vols[] = {
+        {"zvol", "ZIP \xE5\x88\x86\xE5\x8D\xB7 (.z01 - .z99)"},      // ZIP 分卷
+        {"rvol", "RAR \xE5\x88\x86\xE5\x8D\xB7 (.r00 - .r99)"},      // RAR 分卷
+        {"nvol", "\xE6\x95\xB0\xE5\xAD\x97\xE5\xBA\x8F\xE5\x8F\xB7\xE5\x88\x86\xE5\x8D\xB7 (xxx.zip.001)"},  // 数字序号分卷
+    };
+    for (const auto& v : vols) {
+        PageState::ExtRow r;
+        r.kind = 2;
+        r.title = v.second;
+        page->extEntries.push_back({v.first, v.second});
+        r.entries.push_back((int)page->extEntries.size() - 1);
+        page->extRows.push_back(r);
+    }
+}
+
+// 应用一个格式开关（全局 set + config 持久化）
+static void applyScanExtToggle(ac::AppModel& m, const std::string& key, bool enabled) {
+    auto& dis = ac::scanDisabledKeys();
+    if (enabled) dis.erase(key);
+    else dis.insert(key);
+    m.config.scanDisabled.assign(dis.begin(), dis.end());
+    m.saveConfig();
 }
 
 const DslAppConfig& dslAppConfig() {
@@ -542,6 +607,23 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 })
                 .build();
         }).build();
+        ex += themeW + gap;
+
+        // 扫描目标按钮（格式勾选弹窗）
+        {
+            float extBtnW = 96.0f * scale;
+            components::button(ui, "scanext.btn")
+                .position(ex, curY)
+                .size(extBtnW, btnH).fontSize(fontSizeSmall)
+                .text(std::string("\xE6\x89\xAB\xE6\x8F\x8F\xE7\x9B\xAE\xE6\xA0\x87"))  // 扫描目标
+                .theme(themeTokens, false)
+                .onClick([page]{
+                    if (page->extEntries.empty()) buildScanExtRows(page);
+                    page->extScroll.set(0.0f);
+                    page->scanExtDlgOpen.set(true);
+                })
+                .build();
+        }
 
         curY += btnH + gap;
     }
@@ -1057,6 +1139,133 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                                 .fontSize(fontSizeSmall)
                                                 .color(r.failed ? warnColor : nameColor)
                                                 .build();
+                                        }).build();
+                                }
+                            })
+                            .build();
+                    }).build();
+                })
+                .build();
+        }
+
+        // 扫描目标对话框（全部支持的格式，勾选决定扫描哪些）
+        {
+            float dlgW = std::min(screen.width * 0.8f, 520.0f * scale);
+            float dlgH = std::min(screen.height * 0.85f, 500.0f * scale);
+            float dPad = 16.0f * scale;
+            float headH = 34.0f * scale;
+            float extRowH = 32.0f * scale;
+            auto titleColor2 = lightMode ? theme::color(0.08f, 0.09f, 0.11f, 1.0f)
+                                         : theme::color(0.95f, 0.96f, 0.98f, 1.0f);
+            auto secColor = lightMode ? theme::color(0.30f, 0.32f, 0.36f, 1.0f)
+                                      : theme::color(0.72f, 0.74f, 0.78f, 1.0f);
+            auto labelColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                        : theme::color(0.92f, 0.93f, 0.95f, 1.0f);
+            components::dialog(ui, "extDlg")
+                .bindOpen(page->scanExtDlgOpen)
+                .screen(screen.width, screen.height)
+                .size(dlgW, dlgH)
+                .theme(themeTokens)
+                .content([&]() {
+                    ui.text("ed.title").position(dPad, 8.0f * scale)
+                        .size(dlgW - dPad * 2 - 200.0f * scale, headH)
+                        .text(std::string("\xE6\x89\xAB\xE6\x8F\x8F\xE7\x9B\xAE\xE6\xA0\x87")
+                              + std::string(" \xC2\xB7 \xE5\x8B\xBE\xE9\x80\x89\xE8\xA6\x81\xE6\x89\xAB\xE6\x8F\x8F\xE7\x9A\x84\xE6\xA0\xBC\xE5\xBC\x8F"))  // 扫描目标 · 勾选要扫描的格式
+                        .fontSize(fontSizeNormal).color(titleColor2)
+                        .verticalAlign(core::VerticalAlign::Center)
+                        .build();
+                    // 全选（恢复全部格式）
+                    components::button(ui, "ed.all")
+                        .position(dlgW - dPad - 190.0f * scale, 6.0f * scale)
+                        .size(90.0f * scale, 26.0f * scale).fontSize(fontSizeSmall)
+                        .text(std::string("\xE2\x9C\x93 ") + std::string("\xE5\x85\xA8\xE9\x80\x89"))  // ✓ 全选
+                        .theme(themeTokens, false)
+                        .onClick([&m, page]{
+                            ac::scanDisabledKeys().clear();
+                            m.config.scanDisabled.clear();
+                            m.saveConfig();
+                            app::requestUpdate();
+                        })
+                        .build();
+                    // 关闭
+                    components::button(ui, "ed.close")
+                        .position(dlgW - dPad - 92.0f * scale, 6.0f * scale)
+                        .size(82.0f * scale, 26.0f * scale).fontSize(fontSizeSmall)
+                        .text(std::string("\xE2\x9C\x95 ") + std::string("\xE5\x85\xB3\xE9\x97\xAD"))  // ✕ 关闭
+                        .theme(themeTokens, false)
+                        .onClick([page]{ page->scanExtDlgOpen.set(false); })
+                        .build();
+                    ui.rect("ed.sep").position(dPad, headH + 6.0f * scale)
+                        .size(dlgW - dPad * 2, 1.0f)
+                        .color(theme::withOpacity(themeTokens.border, 0.7f))
+                        .build();
+
+                    float listW = dlgW - dPad * 2;
+                    float listY = headH + 7.0f * scale;
+                    float listH = std::max(40.0f * scale, dlgH - listY - dPad);
+                    ui.stack("ed.list.wrap").position(dPad, listY).size(listW, listH).content([&]{
+                        components::virtualList(ui, "ed.list")
+                            .size(listW, listH)
+                            .itemCount((int64_t)page->extRows.size())
+                            .rowHeight(extRowH)
+                            .bind(page->extScroll)
+                            .theme(themeTokens)
+                            .row([&](eui::Ui& rui, const std::string& rowId, int64_t index, float w, float h) {
+                                if (index < 0 || index >= (int64_t)page->extRows.size()) return;
+                                const auto& r = page->extRows[(size_t)index];
+                                auto rowTheme = lightMode ? components::theme::light() : components::theme::dark();
+                                if (r.kind == 0) {
+                                    // 节标题
+                                    rui.row(rowId).size(w, h)
+                                        .padding(2.0f * scale, 6.0f * scale, 0, 0)
+                                        .alignItems(core::Align::CENTER).content([&]{
+                                            rui.text(rowId + ".t").text(r.title)
+                                                .fontSize(fontSizeSmall).color(secColor).build();
+                                        }).build();
+                                } else if (r.kind == 1) {
+                                    // 格式格：每行 4 个 [✓] .ext
+                                    float cellW = w / 4.0f;
+                                    for (size_t c = 0; c < r.entries.size(); ++c) {
+                                        int ei = r.entries[c];
+                                        if (ei < 0 || ei >= (int)page->extEntries.size()) continue;
+                                        const auto& ent = page->extEntries[(size_t)ei];
+                                        bool on = ac::scanKeyEnabled(ent.key);
+                                        float cx = (float)c * cellW + 8.0f * scale;
+                                        std::string cid = rowId + ".c" + std::to_string(c);
+                                        rui.row(cid).position(cx, 0)
+                                            .size(cellW - 8.0f * scale, h).gap(6.0f * scale)
+                                            .alignItems(core::Align::CENTER).content([&]{
+                                                components::checkbox(rui, cid + ".k")
+                                                    .checked(on)
+                                                    .theme(rowTheme)
+                                                    .onChange([&m, page, ei](bool v){
+                                                        if (ei < 0 || ei >= (int)page->extEntries.size()) return;
+                                                        applyScanExtToggle(m, page->extEntries[(size_t)ei].key, v);
+                                                    })
+                                                    .build();
+                                                rui.text(cid + ".l").text(ent.label)
+                                                    .fontSize(fontSizeSmall).color(labelColor).build();
+                                            }).build();
+                                    }
+                                } else {
+                                    // 分卷开关：整行 [✓] 说明
+                                    int ei = r.entries.empty() ? -1 : r.entries[0];
+                                    if (ei < 0 || ei >= (int)page->extEntries.size()) return;
+                                    const auto& ent = page->extEntries[(size_t)ei];
+                                    bool on = ac::scanKeyEnabled(ent.key);
+                                    rui.row(rowId).size(w, h)
+                                        .padding(8.0f * scale, 0, 0, 0).gap(6.0f * scale)
+                                        .alignItems(core::Align::CENTER).content([&]{
+                                            components::checkbox(rui, rowId + ".k")
+                                                .checked(on)
+                                                .theme(rowTheme)
+                                                .onChange([&m, page, ei](bool v){
+                                                    if (ei < 0 || ei >= (int)page->extEntries.size()) return;
+                                                    applyScanExtToggle(m, page->extEntries[(size_t)ei].key, v);
+                                                })
+                                                .build();
+                                            rui.text(rowId + ".l").text(ent.label)
+                                                .fontSize(fontSizeNormal).color(labelColor).build();
                                         }).build();
                                 }
                             })
