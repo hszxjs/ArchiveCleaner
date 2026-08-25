@@ -12,7 +12,6 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
-#include <unordered_map>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -123,7 +122,80 @@ struct PageState {
     bool deleteResultCancelled = false;
     // 保护内容对话框
     eui::Signal<bool> protectedDlgOpen{false};
+    eui::Signal<float> protScroll{0.0f};   // 弹窗内列表滚动偏移
+    // 弹窗列表的扁平化行模型：只在数据变化时重建（展开/收起、打开弹窗），
+    // compose 每帧只读不建——杜绝测量/渲染两遍 ID 不一致导致的错位
+    struct ProtRow {
+        int kind = 0;            // 0=原因标题 1=目录组 2=文件
+        std::string reason;      // kind 0
+        std::wstring dir;        // kind 1
+        std::string app;         // kind 1
+        int count = 0;           // kind 1
+        std::wstring path;       // kind 2
+        std::string label;       // kind 2
+        bool failed = false;     // kind 2
+        bool last = false;       // kind 2：是否组内最后一个（└─ / ├─）
+    };
+    std::vector<ProtRow> protRows;
 };
+
+// 重建保护内容弹窗的行模型（原因 → 应用/目录 → 文件 三级拍平成一级）
+static void rebuildProtRows(app::PageState* page) {
+    auto& m = g_model;
+    page->protRows.clear();
+    struct DirGroup { std::wstring dir; std::string app; std::vector<ArchiveFile> items; };
+    std::vector<std::pair<std::string, std::vector<DirGroup>>> byReason;
+    // 全程持锁：protectedFiles / protectedReasons / failedPaths 共用 filesMutex
+    std::lock_guard<std::mutex> lk(m.filesMutex);
+    for (const auto& pf : m.protectedFiles) {
+        std::wstring dir = ac::path::parentDir(pf.path);
+        std::string reason;
+        auto rit = m.protectedReasons.find(pf.path);
+        if (rit != m.protectedReasons.end()) reason = rit->second;
+        // 找 (原因, 目录) 对应分组，没有则新建
+        DirGroup* g = nullptr;
+        for (auto& br : byReason) {
+            if (br.first != reason) continue;
+            for (auto& cand : br.second)
+                if (cand.dir == dir) { g = &cand; break; }
+            if (g) break;
+        }
+        if (!g) {
+            DirGroup ng;
+            ng.dir = dir;
+            std::string app = detectAppName(dir);
+            if (app.empty()) {
+                size_t sep = dir.find_last_of(L'\\');
+                app = w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
+            }
+            ng.app = app;
+            for (auto& br : byReason) {
+                if (br.first == reason) { br.second.push_back(std::move(ng)); g = &br.second.back(); break; }
+            }
+            if (!g) { byReason.push_back({reason, {std::move(ng)}}); g = &byReason.back().second.back(); }
+        }
+        g->items.push_back(pf);
+    }
+    for (auto& br : byReason) {
+        page->protRows.push_back({0, br.first, {}, {}, 0, {}, {}, false});
+        for (auto& g : br.second) {
+            bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir)
+                            != page->expandedDirs.end();
+            page->protRows.push_back({1, {}, g.dir, g.app, (int)g.items.size(), {}, {}, false});
+            if (!expanded) continue;
+            for (size_t fi = 0; fi < g.items.size(); ++fi) {
+                auto& pf = g.items[fi];
+                std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
+                bool failedFlag = false;
+                if (m.failedPaths.count(pf.path) > 0) {
+                    label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
+                    failedFlag = true;
+                }
+                page->protRows.push_back({2, {}, {}, {}, 0, pf.path, label, failedFlag, fi + 1 == g.items.size()});
+            }
+        }
+    }
+}
 
 const DslAppConfig& dslAppConfig() {
     static const DslAppConfig config = DslAppConfig{}
@@ -471,7 +543,11 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 components::button(ui, "prot.btn").position(bx, curY).size(protBtnW, btnH).fontSize(fontSizeNormal)
                     .text(std::string("\xE2\x9A\xA0 \xE4\xBF\x9D\xE6\x8A\xA4\xE5\x86\x85\xE5\xAE\xB9(") + std::to_string(protTotal) + ")")  // ⚠ 保护内容(N)
                     .disabled(ac::isBusy(st)).theme(themeTokens, false)
-                    .onClick([page]{ page->protectedDlgOpen.set(true); })
+                    .onClick([page]{
+                        rebuildProtRows(page);
+                        page->protScroll.set(0.0f);
+                        page->protectedDlgOpen.set(true);
+                    })
                     .build();
             }
 
@@ -554,152 +630,164 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             .build();
 
         // 保护内容对话框（分类树 + 可滚动 + 复选框勾选纳入删除）
+        // 注意：dialog 设置了 .content() 后只渲染我们的内容（标题/按钮都要自己画），
+        // 列表用 virtualList + 扁平化行模型（protRows），行 ID 全部稳定，杜绝测量/渲染两遍错位
         {
-            float dlgW = std::min(screen.width * 0.86f, 780.0f);
-            float dlgH = std::min(screen.height * 0.85f, 560.0f);
+            float dlgW = std::min(screen.width * 0.86f, 780.0f * scale);
+            float dlgH = std::min(screen.height * 0.85f, 560.0f * scale);
+            float dPad = 16.0f * scale;
+            float headH = 34.0f * scale;
+            float protRowH = 30.0f * scale;
+            auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);
+            auto titleColor = lightMode ? theme::color(0.08f, 0.09f, 0.11f, 1.0f)
+                                        : theme::color(0.95f, 0.96f, 0.98f, 1.0f);
             components::dialog(ui, "protDlg")
                 .bindOpen(page->protectedDlgOpen)
                 .screen(screen.width, screen.height)
                 .size(dlgW, dlgH)
-                .title(std::string("\xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6"))  // 受保护文件
                 .content([&]() {
-                    // 内容区（dialog 面板内绝对布局）
-                    float cx = 24.0f, cy = 56.0f;
-                    float cw = dlgW - 48.0f;
-                    float ch = dlgH - 56.0f - 64.0f;  // 减标题和底部按钮
-                    auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);
-                    auto muted2 = lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
-                                            : theme::color(0.60f, 0.62f, 0.65f, 1.0f);
-                    // 构建分组数据（按 原因→应用/目录 两级）
-                    struct DirGroup { std::wstring dir; std::string app; std::vector<ArchiveFile> items; };
-                    std::vector<DirGroup> groups;
-                    std::unordered_map<std::wstring, size_t> gidx;
-                    std::vector<std::pair<std::string, std::vector<size_t>>> byReason;  // 原因 → 组索引
-                    {
-                        std::lock_guard<std::mutex> lk(m.filesMutex);
-                        for (const auto& pf : m.protectedFiles) {
-                            std::wstring dir = ac::path::parentDir(pf.path);
-                            auto it = gidx.find(dir);
-                            size_t idx;
-                            if (it == gidx.end()) {
-                                idx = groups.size();
-                                gidx[dir] = idx;
-                                DirGroup g;
-                                g.dir = dir;
-                                std::string app = detectAppName(dir);
-                                if (app.empty()) {
-                                    // 用目录名最后一段
-                                    size_t sep = dir.find_last_of(L'\\');
-                                    app = w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
-                                }
-                                g.app = app;
-                                groups.push_back(std::move(g));
-                            } else {
-                                idx = it->second;
-                            }
-                            groups[idx].items.push_back(pf);
-                            // 原因分类
-                            std::string reason;
-                            auto rit = m.protectedReasons.find(pf.path);
-                            if (rit != m.protectedReasons.end()) reason = rit->second;
-                            bool found = false;
-                            for (auto& br : byReason) {
-                                if (br.first == reason) { br.second.push_back(idx); found = true; break; }
-                            }
-                            if (!found) byReason.push_back({reason, {idx}});
-                        }
-                    }
+                    // 标题（左上）
+                    ui.text("pd.title").position(dPad, 8.0f * scale)
+                        .size(dlgW - dPad * 2 - 90.0f * scale, headH)
+                        .text(std::string("\xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6")  // 受保护文件
+                              + std::string(" \xC2\xB7 \xE5\x8B\xBE\xE9\x80\x89\xE5\x90\x8E\xE7\xBA\xB3\xE5\x85\xA5\xE5\x88\xA0\xE9\x99\xA4"))  // · 勾选后纳入删除
+                        .fontSize(fontSizeNormal).color(titleColor)
+                        .verticalAlign(core::VerticalAlign::Center)
+                        .build();
+                    // 关闭按钮（右上，dialog 自带按钮在 content 模式下不渲染）
+                    components::button(ui, "pd.close")
+                        .position(dlgW - dPad - 82.0f * scale, 6.0f * scale)
+                        .size(82.0f * scale, 26.0f * scale).fontSize(fontSizeSmall)
+                        .text(std::string("\xE2\x9C\x95 ") + std::string("\xE5\x85\xB3\xE9\x97\xAD"))  // ✕ 关闭
+                        .theme(themeTokens, false)
+                        .onClick([page]{ page->protectedDlgOpen.set(false); })
+                        .build();
+                    // 分隔线
+                    ui.rect("pd.sep").position(dPad, headH + 6.0f * scale)
+                        .size(dlgW - dPad * 2, 1.0f)
+                        .color(theme::withOpacity(themeTokens.border, 0.7f))
+                        .build();
 
-                    ui.stack("pd.content").position(cx, cy).size(cw, ch).content([&]{
-                        components::scrollView(ui, "pd.scroll")
-                            .size(cw, ch)
-                            .content([&](core::dsl::Ui& sui, float scw, float /*sch*/){
-                                // ⚠ 关键修复：必须用传入的 sui 创建元素（测量阶段用临时 Ui，否则测不出真实高度→不可滚动）
-                                sui.column("pd.col")
-                                    .width(scw)
-                                    .height(core::SizeValue::wrapContent())
-                                    .gap(3.0f)
-                                    .content([&]{
-                                        for (auto& br : byReason) {
-                                            // 一级：原因分类
-                                            sui.text("pd.r." + std::to_string(reinterpret_cast<size_t>(&br)))
-                                                .text(std::string("\xE2\x97\x8F ") + br.first)  // ●
-                                                .fontSize(14.0f)
-                                                .color(warnColor)
-                                                .build();
-                                            for (size_t ri = 0; ri < br.second.size(); ++ri) {
-                                                auto& g = groups[br.second[ri]];
-                                                std::string gid = "pd.g" + std::to_string(br.second[ri]);
-                                                bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
-                                                // 二级：应用/目录组头
-                                                sui.row(gid + ".h").width(scw).height(26.0f).gap(6.0f)
-                                                    .padding(16.0f, 0, 0, 0)
-                                                    .alignItems(core::Align::CENTER)
-                                                    .content([&]{
-                                                    sui.text(gid + ".arrow")
-                                                        .text(expanded ? "\xE2\x96\xBE" : "\xE2\x96\xB8")  // ▾ ▸
-                                                        .fontSize(12.0f)
-                                                        .color(muted2)
-                                                        .build();
-                                                    components::button(sui, gid + ".btn")
-                                                        .size(scw - 16.0f - 120.0f, 24.0f)
-                                                        .fontSize(12.0f)
-                                                        .text(g.app + std::string("  (") + std::to_string(g.items.size()) + std::string(")"))
-                                                        .theme(themeTokens, false)
-                                                        .onClick([page, dir = g.dir]{
-                                                            auto& v = page->expandedDirs;
-                                                            auto it2 = std::find(v.begin(), v.end(), dir);
-                                                            if (it2 != v.end()) v.erase(it2);
-                                                            else v.push_back(dir);
-                                                            app::requestUpdate();
-                                                        })
-                                                        .build();
-                                                    sui.text(gid + ".cnt")
-                                                        .width(110.0f).height(24.0f)
-                                                        .text(w2u(g.dir))
-                                                        .fontSize(9.0f)
-                                                        .color(muted2)
-                                                        .verticalAlign(core::VerticalAlign::Center)
-                                                        .build();
-                                                }).build();
-                                                // 三级：文件叶子
-                                                if (expanded) {
-                                                    for (size_t fi = 0; fi < g.items.size(); ++fi) {
-                                                        auto& pf = g.items[fi];
-                                                        std::string rid = gid + ".f" + std::to_string(fi);
-                                                        bool sel = m.selectedPaths.count(pf.path) > 0;
-                                                        bool failed = m.failedPaths.count(pf.path) > 0;
-                                                        bool last = (fi + 1 == g.items.size());
-                                                        std::string conn = last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ";  // └─ ├─
-                                                        sui.row(rid).width(scw).height(24.0f).gap(6.0f)
-                                                            .padding(44.0f, 0, 0, 0)
-                                                            .alignItems(core::Align::CENTER)
-                                                            .content([&]{
-                                                            sui.text(rid + ".c").text(conn).fontSize(11.0f).color(muted2).build();
-                                                            components::checkbox(sui, rid + ".k")
-                                                                .checked(sel)
-                                                                .theme(themeTokens)
-                                                                .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
-                                                                .build();
-                                                            std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
-                                                            if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;
-                                                            sui.text(rid + ".n").text(label).fontSize(11.0f)
-                                                                .color(failed ? warnColor
-                                                                     : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
-                                                                                  : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
-                                                                .build();
-                                                        }).build();
-                                                    }
-                                                }
-                                            }
-                                        }
+                    float listW = dlgW - dPad * 2;
+                    float listY = headH + 7.0f * scale;
+                    float listH = std::max(40.0f * scale, dlgH - listY - dPad);
+                    if (page->protRows.empty()) {
+                        ui.text("pd.empty").position(dPad, listY + 10.0f * scale).size(listW, 24.0f * scale)
+                            .text(std::string("\xE6\x9A\x82\xE6\x97\xA0\xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6"))  // 暂无受保护文件
+                            .fontSize(fontSizeSmall)
+                            .color(lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
+                                             : theme::color(0.60f, 0.62f, 0.65f, 1.0f))
+                            .build();
+                        return;
+                    }
+                    // virtualList 不支持 position，用外层 stack 定位
+                    ui.stack("pd.list.wrap").position(dPad, listY).size(listW, listH).content([&]{
+                        components::virtualList(ui, "pd.list")
+                            .size(listW, listH)
+                            .itemCount((int64_t)page->protRows.size())
+                            .rowHeight(protRowH)
+                            .bind(page->protScroll)
+                            .row([&](eui::Ui& rui, const std::string& rowId, int64_t index, float w, float h) {
+                                if (index < 0 || index >= (int64_t)page->protRows.size()) return;
+                                const auto& r = page->protRows[(size_t)index];
+                                auto rowTheme = lightMode ? components::theme::light() : components::theme::dark();
+                                auto nameColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                                           : theme::color(0.92f, 0.93f, 0.95f, 1.0f);
+                                auto muted2 = lightMode ? theme::color(0.40f, 0.42f, 0.45f, 1.0f)
+                                                        : theme::color(0.60f, 0.62f, 0.65f, 1.0f);
+                                if (r.kind == 0) {
+                                    // 一级：原因标题
+                                    rui.row(rowId).size(w, h)
+                                        .padding(2.0f * scale, 4.0f * scale, 0, 0).gap(6.0f * scale)
+                                        .alignItems(core::Align::CENTER).content([&]{
+                                            rui.text(rowId + ".dot")
+                                                .text("\xE2\x97\x8F")  // ●
+                                                .fontSize(fontSizeSmall).color(warnColor).build();
+                                            rui.text(rowId + ".t").text(r.reason)
+                                                .fontSize(fontSizeSmall).color(warnColor).build();
+                                        }).build();
+                                } else if (r.kind == 1) {
+                                    // 二级：应用/目录组头（整行可点，展开/收起）
+                                    std::wstring gdir = r.dir;
+                                    bool expanded = std::find(page->expandedDirs.begin(),
+                                                              page->expandedDirs.end(), gdir)
+                                                    != page->expandedDirs.end();
+                                    rui.stack(rowId).size(w, h).content([&]{
+                                        rui.rect(rowId + ".hit").size(w, h)
+                                            .states(theme::color(0.0f, 0.0f, 0.0f, 0.0f),
+                                                    themeTokens.surfaceHover,
+                                                    themeTokens.surfaceHover)
+                                            .radius(6.0f * scale)
+                                            // 只捕获平凡类型（指针+行号），点击时再查表——闭包存储非平凡捕获在此深度编译不过
+                                            .onClick([page, gi = index]{
+                                                if (gi < 0 || gi >= (int64_t)page->protRows.size()) return;
+                                                if (page->protRows[(size_t)gi].kind != 1) return;
+                                                std::wstring dir = page->protRows[(size_t)gi].dir;
+                                                auto& v = page->expandedDirs;
+                                                auto it = std::find(v.begin(), v.end(), dir);
+                                                if (it != v.end()) v.erase(it);
+                                                else v.push_back(dir);
+                                                rebuildProtRows(page);
+                                                app::requestUpdate();
+                                            })
+                                            .build();
+                                        float padL = 14.0f * scale, padR = 10.0f * scale;
+                                        float arrowW = 14.0f * scale, gap2 = 8.0f * scale;
+                                        float nameW = w * 0.42f;
+                                        float pathW = std::max(60.0f * scale,
+                                                               w - padL - padR - arrowW - gap2 - nameW - gap2);
+                                        rui.text(rowId + ".a").position(padL, 0).size(arrowW, h)
+                                            .text(expanded ? "\xE2\x96\xBE" : "\xE2\x96\xB8")  // ▾ ▸
+                                            .fontSize(fontSizeSmall).color(muted2)
+                                            .horizontalAlign(core::HorizontalAlign::Center)
+                                            .verticalAlign(core::VerticalAlign::Center)
+                                            .build();
+                                        rui.text(rowId + ".n")
+                                            .position(padL + arrowW + gap2, 0).size(nameW, h)
+                                            .text(r.app + " (" + std::to_string(r.count) + ")")
+                                            .fontSize(fontSizeNormal).color(nameColor)
+                                            .verticalAlign(core::VerticalAlign::Center)
+                                            .build();
+                                        rui.text(rowId + ".p")
+                                            .position(w - padR - pathW, 0).size(pathW, h)
+                                            .text(w2u(gdir))
+                                            .fontSize(fontSizeTiny).color(muted2)
+                                            .horizontalAlign(core::HorizontalAlign::Right)
+                                            .verticalAlign(core::VerticalAlign::Center)
+                                            .build();
                                     }).build();
+                                } else {
+                                    // 三级：文件行（连接符 + 复选框 + 名称·大小）
+                                    bool sel = false;
+                                    {
+                                        std::lock_guard<std::mutex> lk(m.filesMutex);
+                                        sel = m.selectedPaths.count(r.path) > 0;
+                                    }
+                                    rui.row(rowId).size(w, h)
+                                        .padding(40.0f * scale, 0, 10.0f * scale, 0).gap(8.0f * scale)
+                                        .alignItems(core::Align::CENTER).content([&]{
+                                            rui.text(rowId + ".c")
+                                                .text(r.last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ")  // └─ ├─
+                                                .fontSize(fontSizeTiny).color(muted2).build();
+                                            components::checkbox(rui, rowId + ".k")
+                                                .checked(sel)
+                                                .theme(rowTheme)
+                                                .onChange([&m, page, fi = index](bool v){
+                                                    if (fi < 0 || fi >= (int64_t)page->protRows.size()) return;
+                                                    if (page->protRows[(size_t)fi].kind != 2) return;
+                                                    m.toggleSelect(page->protRows[(size_t)fi].path);
+                                                })
+                                                .build();
+                                            rui.text(rowId + ".n").text(r.label)
+                                                .fontSize(fontSizeSmall)
+                                                .color(r.failed ? warnColor : nameColor)
+                                                .build();
+                                        }).build();
+                                }
                             })
                             .build();
                     }).build();
                 })
-                .primaryText(std::string("\xE5\x85\xB3\xE9\x97\xAD"))  // 关闭
-                .onPrimary([page]{ page->protectedDlgOpen.set(false); })
                 .build();
         }
 
