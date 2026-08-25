@@ -35,14 +35,20 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 
 - 📁 **智能扫描**
   - 自动排除回收站（`$RECYCLE.BIN`）和系统目录
+  - **扫描目标自选**：弹窗勾选要扫描的格式——标准压缩（zip/rar/7z/tar/gz…18 种）、封装打包（jar/apk/wim/deb…15 种）、分卷（`.z01-.z99` / `.r00-.r99` / `xxx.zip.001` 按组开关），选择持久保存
   - **程序目录保护（五层）**：防止误删 mods、材质包、游戏资源、开发依赖导致程序损坏
     1. 内置目录模式：`.minecraft`、`mods`、`steamapps`、`Program Files`、`Windows`、`node_modules`、`.m2`、`.gradle`、`.nuget`、`site-packages`、`venv`、`vendor`、`third_party` 等
     2. 注册表安装路径：自动枚举所有已安装程序的安装目录（含国产游戏的自定义路径，如 `D:\Games\某游戏\`）
     3. exe 同目录检测：绿色版/免安装游戏的资源包与游戏 exe 同目录，自动跳过
     4. 项目标记检测：压缩包所在目录含 `.git`、`package.json`、`Cargo.toml`、`go.mod`、`pom.xml`、`CMakeLists.txt`、`*.sln` 等标记 = 源码项目目录，跳过
     5. 状态栏显示跳过数，config 可整体关闭或添加自定义保护路径
+  - **受保护文件审查**：被拦截的文件在「保护内容」弹窗中按 拦截原因 → 软件 → 路径 → 文件 四级树展示，可勾选纳入删除
   - 支持标准压缩格式 + 分卷压缩（`.z01`-`.z99`、`.r00`-`.r99`、`.7z.001`）+ 封装格式（`.jar` `.apk` `.wim` 等）
   - 路径归一化（正反斜杠混合不再导致删除失败）
+
+- 🏷️ **结果按软件归类**
+  - 扫描结果按所属软件分组显示，同软件多路径合并，组级勾选一键全选
+  - 智能软件识别：读取 exe 版本资源 / 注册表卸载信息 / Program Files 目录结构，显示真实软件名（如 WPS Office、NVIDIA、AutoCAD）
 
 - 🌓 **日间/夜间主题切换**
   - 一键切换，所有控件实时响应
@@ -63,9 +69,9 @@ ArchiveCleaner 是一个 Windows 桌面工具，用于扫描指定文件夹下�
 1. 在路径栏输入路径，或点击 `...` 按钮弹窗选择文件夹
 2. 选择搜索引擎（Everything / Win32）
 3. 选择删除方式（回收站 / 永久）
-4. 点击「开始扫描」
-5. 勾选要删除的压缩包文件（支持全选/反选）
-6. 点击「删除选中」并确认
+4. （可选）点击「扫描目标」勾选要扫描的格式，默认全部启用
+5. 点击「开始扫描」，结果按所属软件分组显示，展开组勾选文件（支持组级全选/全选/反选）
+6. 点击「删除选中」并确认；如需查看被保护拦截的文件，点击「保护内容」
 
 ## 从源码构建
 
@@ -117,7 +123,9 @@ third_party/
 - [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) (Apache 2.0) — GPU UI 框架
 - [GLFW](https://www.glfw.org/) (zlib) — 窗口和输入
 - [FreeType](https://freetype.org/) (FTL) — 字体渲染
+- [fd](https://github.com/sharkdp/fd) (MIT/Apache-2.0) — 文件查找工具
 - [Everything](https://www.voidtools.com/) — 文件索引服务
+- Font Awesome (OFL/CC BY 4.0)、荆南君君体、优设标题黑 — 随包字体（详见第三方许可）
 
 ## 许可证
 

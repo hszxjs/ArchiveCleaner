@@ -97,6 +97,31 @@ of this software and associated documentation files...
 
 ---
 
+## Bundled Fonts
+
+以下字体文件随程序分发（`assets/` 目录）。
+
+### Font Awesome 7 Free — Solid 900 (SIL OFL 1.1 / CC BY 4.0)
+
+- **Project**: [Font Awesome](https://fontawesome.com/)
+- **Author**: Fonticons, Inc.
+- **License**: 字体文件采用 SIL Open Font License 1.1；图标图形采用 CC BY 4.0
+- **Usage**: 图标字体（bundled in EUI-NEO assets）
+
+### 荆南君君体 (JingNanJunJunTi)
+
+- **Project**: 荆南君君体（作者：荆南君君）
+- **License**: 作者公开发布的免费商用授权（可免费用于个人和商业项目，禁止单独出售字体文件）
+- **Usage**: 默认 UI 文字字体（bundled in EUI-NEO assets）
+
+### 优设标题黑 (YouSheBiaoTiHei)
+
+- **Project**: [优设标题黑](https://www.uisdc.com/uisdc-font)（作者：优设 UISDC）
+- **License**: 作者公开发布的免费商用授权（可免费用于个人和商业项目）
+- **Usage**: 框架可选标题字体（bundled in EUI-NEO assets）
+
+---
+
 ## Additional Tools
 
 The following tools are optionally used at runtime:
@@ -107,9 +132,9 @@ The following tools are optionally used at runtime:
 - **Usage**: File indexing service for instant search
 - **Note**: Bundled in installer as optional component
 
-### fd / fdfind (MIT License)
+### fd / fdfind (MIT OR Apache-2.0)
 
 - **Project**: [fd](https://github.com/sharkdp/fd)
 - **Author**: David Peter
-- **License**: MIT License
+- **License**: Dual licensed under the MIT License and Apache License 2.0
 - **Usage**: Fast file finder (search engine option)
