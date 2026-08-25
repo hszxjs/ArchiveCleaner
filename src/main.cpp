@@ -435,75 +435,114 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     }).build();  // fileList.wrap stack 结束
     curY += listH + gap;
 
-    // --- 受保护文件区（按目录分组，可展开，复选框默认不勾）---
+    // --- 受保护文件区（树状图：目录为枝干、文件为叶子，可展开，复选框默认不勾）---
     if (protTotal > 0) {
         auto warnColor = theme::color(0.95f, 0.62f, 0.15f, 1.0f);   // 橙色警示
+        auto lineColor = lightMode ? theme::color(0.70f, 0.72f, 0.75f, 1.0f)
+                                   : theme::color(0.38f, 0.40f, 0.44f, 1.0f);  // 树线灰
+        float headH = 24.0f * scale;
+        float leafH = rowH * 0.78f;
+        float indent = 22.0f * scale;
+
         ui.stack("prot.wrap").position(pad, curY).size(contentW, protH).content([&]{
             components::scrollView(ui, "prot.scroll")
                 .size(contentW, protH)
-                .content([&](core::dsl::Ui& /*sui*/, float /*cw*/, float /*ch*/){
-                    ui.column("prot.col").size(contentW, protH).gap(gap * 0.5f).content([&]{
-                        // 标题行
-                        ui.text("prot.title")
-                            .text(std::string("\xE2\x9A\xA0 \xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6 ") // ⚠ 受保护文件
-                                  + std::to_string(protTotal)
-                                  + std::string(" \xE4\xB8\xAA\xEF\xBC\x88\xE7\xA8\x8B\xE5\xBA\x8F/\xE6\xB8\xB8\xE6\x88\x8F/\xE6\xBA\x90\xE7\xA0\x81\xEF\xBC\x8C\xE7\xA1\xAE\xE8\xAE\xA4\xE5\x90\x8E\xE5\x8F\xAF\xE5\x8B\xBE\xE9\x80\x89\xE5\x88\xA0\xE9\x99\xA4\xEF\xBC\x89")) // （程序/游戏/源码，确认后可勾选删除）
-                            .fontSize(fontSizeSmall)
-                            .color(warnColor)
-                            .build();
-
-                        for (size_t gi = 0; gi < protGroups.size(); ++gi) {
-                            auto& g = protGroups[gi];
-                            std::string gid = "prot.g" + std::to_string(gi);
-                            bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
-
-                            // 组头：目录路径 + 数量 + 原因 + 展开/收起箭头
-                            std::string header = (expanded ? "\xE2\x96\xBE " : "\xE2\x96\xB8 ")   // ▾ / ▸
-                                + w2u(g.dir)
-                                + std::string("  (") + std::to_string(g.items.size())
-                                + std::string(" \xE4\xB8\xAA \xC2\xB7 ") + g.reason + ")";
-                            components::button(ui, gid + ".head")
-                                .size(contentW, 22.0f * scale)
-                                .fontSize(fontSizeTiny)
-                                .text(header)
-                                .theme(themeTokens, false)
-                                .onClick([page, dir = g.dir]{
-                                    auto& v = page->expandedDirs;
-                                    auto it = std::find(v.begin(), v.end(), dir);
-                                    if (it != v.end()) v.erase(it);
-                                    else v.push_back(dir);
-                                    app::requestUpdate();
-                                })
+                .content([&](core::dsl::Ui& /*sui*/, float cw, float /*ch*/){
+                    ui.column("prot.col")
+                        .width(cw)
+                        .height(core::SizeValue::wrapContent())   // 关键：内容自适应高度，scrollView 才能测出真实高度并滚动
+                        .gap(2.0f * scale)
+                        .content([&]{
+                            // 标题行
+                            ui.text("prot.title")
+                                .text(std::string("\xE2\x9A\xA0 \xE5\x8F\x97\xE4\xBF\x9D\xE6\x8A\xA4\xE6\x96\x87\xE4\xBB\xB6 ")  // ⚠ 受保护文件
+                                      + std::to_string(protTotal)
+                                      + std::string(" \xE4\xB8\xAA\xEF\xBC\x88\xE7\xA1\xAE\xE8\xAE\xA4\xE5\xAE\x89\xE5\x85\xA8\xE5\x90\x8E\xE5\x8F\xAF\xE5\x8B\xBE\xE9\x80\x89\xE5\x88\xA0\xE9\x99\xA4\xEF\xBC\x89"))
+                                .fontSize(fontSizeSmall)
+                                .color(warnColor)
                                 .build();
 
-                            // 展开时：文件行（复选框 + 文件名 + 大小）
-                            if (expanded) {
-                                for (size_t fi = 0; fi < g.items.size(); ++fi) {
-                                    auto& pf = g.items[fi];
-                                    std::string rid = gid + ".f" + std::to_string(fi);
-                                    bool sel = m.selectedPaths.count(pf.path) > 0;
-                                    bool failed = m.failedPaths.count(pf.path) > 0;
-                                    ui.row(rid).size(contentW - 16.0f * scale, rowH * 0.8f)
-                                        .padding(8.0f * scale, 2.0f * scale).gap(10.0f * scale).content([&]{
-                                        components::checkbox(ui, rid + ".chk")
-                                            .checked(sel)
-                                            .theme(themeTokens)
-                                            .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
-                                            .build();
-                                        std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
-                                        if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
-                                        ui.text(rid + ".name")
-                                            .text(label)
-                                            .fontSize(fontSizeTiny)
-                                            .color(failed ? warnColor
-                                                 : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
-                                                              : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
-                                            .build();
-                                    }).build();
+                            for (size_t gi = 0; gi < protGroups.size(); ++gi) {
+                                auto& g = protGroups[gi];
+                                std::string gid = "prot.g" + std::to_string(gi);
+                                bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir) != page->expandedDirs.end();
+
+                                // 组头：左侧色条 + 折叠按钮（箭头+路径+数量）+ 原因标签
+                                ui.row(gid + ".hrow").width(cw).height(headH).gap(6.0f * scale)
+                                    .alignItems(core::Align::CENTER).content([&]{
+                                    // 左侧竖色条（树干）
+                                    ui.rect(gid + ".bar").size(3.0f * scale, headH * 0.8f)
+                                        .color(warnColor).radius(1.5f * scale).build();
+                                    // 折叠按钮
+                                    std::string header = (expanded ? "\xE2\x96\xBE " : "\xE2\x96\xB8 ")  // ▾ / ▸
+                                        + w2u(g.dir)
+                                        + std::string("  (") + std::to_string(g.items.size())
+                                        + std::string("\xE4\xB8\xAA)");  // 个)
+                                    components::button(ui, gid + ".head")
+                                        .size(cw - 3.0f * scale - 90.0f * scale - 12.0f * scale, headH)
+                                        .fontSize(fontSizeTiny)
+                                        .text(header)
+                                        .theme(themeTokens, false)
+                                        .onClick([page, dir = g.dir]{
+                                            auto& v = page->expandedDirs;
+                                            auto it = std::find(v.begin(), v.end(), dir);
+                                            if (it != v.end()) v.erase(it);
+                                            else v.push_back(dir);
+                                            app::requestUpdate();
+                                        })
+                                        .build();
+                                    // 原因标签（橙色小字）
+                                    ui.text(gid + ".reason")
+                                        .width(90.0f * scale).height(headH)
+                                        .text(g.reason)
+                                        .fontSize(fontSizeTiny)
+                                        .color(warnColor)
+                                        .verticalAlign(core::VerticalAlign::Center)
+                                        .build();
+                                }).build();
+
+                                // 叶子行：缩进 + 树连接符（├─ / └─）+ 复选框 + 文件名
+                                if (expanded) {
+                                    for (size_t fi = 0; fi < g.items.size(); ++fi) {
+                                        auto& pf = g.items[fi];
+                                        std::string rid = gid + ".f" + std::to_string(fi);
+                                        bool sel = m.selectedPaths.count(pf.path) > 0;
+                                        bool failed = m.failedPaths.count(pf.path) > 0;
+                                        bool last = (fi + 1 == g.items.size());
+                                        // 树连接符：非最后 ├─，最后 └─
+                                        std::string conn = last
+                                            ? "\xE2\x94\x94\xE2\x94\x80 "   // └─
+                                            : "\xE2\x94\x9C\xE2\x94\x80 ";  // ├─
+                                        ui.row(rid).width(cw).height(leafH)
+                                            .padding(indent, 0, 0, 0)
+                                            .gap(6.0f * scale)
+                                            .alignItems(core::Align::CENTER)
+                                            .content([&]{
+                                            // 连接符（灰色）
+                                            ui.text(rid + ".conn")
+                                                .text(conn)
+                                                .fontSize(fontSizeTiny)
+                                                .color(lineColor)
+                                                .build();
+                                            components::checkbox(ui, rid + ".chk")
+                                                .checked(sel)
+                                                .theme(themeTokens)
+                                                .onChange([&m, path = pf.path](bool v){ m.toggleSelect(path); })
+                                                .build();
+                                            std::string label = w2u(pf.name) + "  \xC2\xB7  " + ac::sizeHuman(pf.size);
+                                            if (failed) label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
+                                            ui.text(rid + ".name")
+                                                .text(label)
+                                                .fontSize(fontSizeTiny)
+                                                .color(failed ? warnColor
+                                                     : (lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
+                                                                  : theme::color(0.92f, 0.93f, 0.95f, 1.0f)))
+                                                .build();
+                                        }).build();
+                                    }
                                 }
                             }
-                        }
-                    }).build();
+                        }).build();
                 })
                 .build();
         }).build();
