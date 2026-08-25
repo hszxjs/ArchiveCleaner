@@ -748,6 +748,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                         .padding(10.0f * scale, 0, 8.0f * scale, 0).gap(8.0f * scale)
                         .alignItems(core::Align::CENTER).content([&]{
                             components::checkbox(ui, rowId + ".gchk")
+                                .size(34.0f * scale, h)
+                                .boxSize(15.0f * scale)
                                 .checked(allSel)
                                 .theme(rowTheme)
                                 .onChange([&m, page, gi = index](bool v){
@@ -816,6 +818,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                             .fontSize(fontSizeTiny).color(muted2).build();
                     }
                     components::checkbox(ui, rowId + ".chk")
+                        .size(26.0f * scale, h)
+                        .boxSize(15.0f * scale)
                         .checked(selected)
                         .theme(rowTheme)
                         .onChange([&m, path = af.path](bool v){ m.toggleSelect(path); })
@@ -1127,6 +1131,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                                 .text(r.last ? "\xE2\x94\x94\xE2\x94\x80 " : "\xE2\x94\x9C\xE2\x94\x80 ")  // └─ ├─
                                                 .fontSize(fontSizeTiny).color(muted2).build();
                                             components::checkbox(rui, rowId + ".k")
+                                                .size(26.0f * scale, h)
+                                                .boxSize(15.0f * scale)
                                                 .checked(sel)
                                                 .theme(rowTheme)
                                                 .onChange([&m, page, fi = index](bool v){
@@ -1159,8 +1165,6 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                          : theme::color(0.95f, 0.96f, 0.98f, 1.0f);
             auto secColor = lightMode ? theme::color(0.30f, 0.32f, 0.36f, 1.0f)
                                       : theme::color(0.72f, 0.74f, 0.78f, 1.0f);
-            auto labelColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
-                                        : theme::color(0.92f, 0.93f, 0.95f, 1.0f);
             components::dialog(ui, "extDlg")
                 .bindOpen(page->scanExtDlgOpen)
                 .screen(screen.width, screen.height)
@@ -1224,6 +1228,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                         }).build();
                                 } else if (r.kind == 1) {
                                     // 格式格：每行 4 个 [✓] .ext
+                                    // ⚠ 复选框必须用自带 .text() 排版并显式 .size()——组件默认 180px 宽，
+                                    //   外置文字会被 180px 的盒子挤出格子（文字飘走/第一列消失的根因）
                                     float cellW = w / 4.0f;
                                     for (size_t c = 0; c < r.entries.size(); ++c) {
                                         int ei = r.entries[c];
@@ -1232,31 +1238,12 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                         bool on = ac::scanKeyEnabled(ent.key);
                                         float cx = (float)c * cellW + 8.0f * scale;
                                         std::string cid = rowId + ".c" + std::to_string(c);
-                                        rui.row(cid).position(cx, 0)
-                                            .size(cellW - 8.0f * scale, h).gap(6.0f * scale)
-                                            .alignItems(core::Align::CENTER).content([&]{
-                                                components::checkbox(rui, cid + ".k")
-                                                    .checked(on)
-                                                    .theme(rowTheme)
-                                                    .onChange([&m, page, ei](bool v){
-                                                        if (ei < 0 || ei >= (int)page->extEntries.size()) return;
-                                                        applyScanExtToggle(m, page->extEntries[(size_t)ei].key, v);
-                                                    })
-                                                    .build();
-                                                rui.text(cid + ".l").text(ent.label)
-                                                    .fontSize(fontSizeSmall).color(labelColor).build();
-                                            }).build();
-                                    }
-                                } else {
-                                    // 分卷开关：整行 [✓] 说明
-                                    int ei = r.entries.empty() ? -1 : r.entries[0];
-                                    if (ei < 0 || ei >= (int)page->extEntries.size()) return;
-                                    const auto& ent = page->extEntries[(size_t)ei];
-                                    bool on = ac::scanKeyEnabled(ent.key);
-                                    rui.row(rowId).size(w, h)
-                                        .padding(8.0f * scale, 0, 0, 0).gap(6.0f * scale)
-                                        .alignItems(core::Align::CENTER).content([&]{
-                                            components::checkbox(rui, rowId + ".k")
+                                        rui.stack(cid + ".wrap").position(cx, 0).size(cellW, h).content([&]{
+                                            components::checkbox(rui, cid)
+                                                .size(cellW - 8.0f * scale, h)
+                                                .boxSize(15.0f * scale)
+                                                .fontSize(fontSizeSmall)
+                                                .text(ent.label)
                                                 .checked(on)
                                                 .theme(rowTheme)
                                                 .onChange([&m, page, ei](bool v){
@@ -1264,9 +1251,26 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                                     applyScanExtToggle(m, page->extEntries[(size_t)ei].key, v);
                                                 })
                                                 .build();
-                                            rui.text(rowId + ".l").text(ent.label)
-                                                .fontSize(fontSizeNormal).color(labelColor).build();
                                         }).build();
+                                    }
+                                } else {
+                                    // 分卷开关：整行复选框（自带文字）
+                                    int ei = r.entries.empty() ? -1 : r.entries[0];
+                                    if (ei < 0 || ei >= (int)page->extEntries.size()) return;
+                                    const auto& ent = page->extEntries[(size_t)ei];
+                                    bool on = ac::scanKeyEnabled(ent.key);
+                                    components::checkbox(rui, rowId)
+                                        .size(w - 16.0f * scale, h)
+                                        .boxSize(15.0f * scale)
+                                        .fontSize(fontSizeNormal)
+                                        .text(ent.label)
+                                        .checked(on)
+                                        .theme(rowTheme)
+                                        .onChange([&m, page, ei](bool v){
+                                            if (ei < 0 || ei >= (int)page->extEntries.size()) return;
+                                            applyScanExtToggle(m, page->extEntries[(size_t)ei].key, v);
+                                        })
+                                        .build();
                                 }
                             })
                             .build();
