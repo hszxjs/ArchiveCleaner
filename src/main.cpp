@@ -620,6 +620,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         .itemCount(itemCount)
         .rowHeight(rowH)
         .bind(page->scrollOffset)
+        .theme(themeTokens)
         .row([&](eui::Ui& ui, const std::string& rowId, int64_t index, float w, float h) {
             auto rowTheme = lightMode ? components::theme::light() : components::theme::dark();
             auto nameColor = lightMode ? theme::color(0.1f, 0.1f, 0.12f, 1.0f)
@@ -838,6 +839,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             .bindOpen(page->deleteConfirmOpen)
             .screen(screen.width, screen.height)
             .size(400.0f * scale, 220.0f * scale)
+            .theme(themeTokens)
             .title(page->deleteConfirmPermanent ? "确认永久删除" : "确认删除")
             .message(std::string("即将") + (page->deleteConfirmPermanent ? "永久删除" : "送入回收站")
                      + " " + std::to_string(page->deleteConfirmCount) + " 个文件（"
@@ -863,6 +865,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             .bindOpen(page->deleteResultOpen)
             .screen(screen.width, screen.height)
             .size(380.0f * scale, 200.0f * scale)
+            .theme(themeTokens)
             .title("删除完成")
             .message(std::string(page->deleteResultCancelled ? "已取消 · " : "")
                      + "成功 " + std::to_string(page->deleteResultSuccess) + " 个"
@@ -888,6 +891,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 .bindOpen(page->protectedDlgOpen)
                 .screen(screen.width, screen.height)
                 .size(dlgW, dlgH)
+                .theme(themeTokens)
                 .content([&]() {
                     // 标题（左上）
                     ui.text("pd.title").position(dPad, 8.0f * scale)
@@ -930,6 +934,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                             .itemCount((int64_t)page->protRows.size())
                             .rowHeight(protRowH)
                             .bind(page->protScroll)
+                            .theme(themeTokens)
                             .row([&](eui::Ui& rui, const std::string& rowId, int64_t index, float w, float h) {
                                 if (index < 0 || index >= (int64_t)page->protRows.size()) return;
                                 const auto& r = page->protRows[(size_t)index];
