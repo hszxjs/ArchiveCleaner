@@ -128,9 +128,10 @@ struct PageState {
     struct ProtRow {
         int kind = 0;            // 0=原因标题 1=目录组 2=文件
         std::string reason;      // kind 0
-        std::wstring dir;        // kind 1
-        std::string app;         // kind 1
+        std::wstring dir;        // kind 1（文件父目录，展开/收起的 key）
+        std::string app;         // kind 1（软件显示名）
         int count = 0;           // kind 1
+        std::wstring dispDir;    // kind 1（右侧展示的目录：软件根目录优先，比深层路径短且可读）
         std::wstring path;       // kind 2
         std::string label;       // kind 2
         bool failed = false;     // kind 2
@@ -139,11 +140,26 @@ struct PageState {
     std::vector<ProtRow> protRows;
 };
 
+// 识别受保护目录所属软件的显示名（弹窗分组标题，让用户一眼认出软件）：
+// ① 关键词（steamapps/minecraft/node_modules 等精确规则）
+// ② findAppIdentity：向上找 exe 读版本资源名 / 反查注册表 DisplayName / 有意义目录段
+static std::string resolveAppName(const std::wstring& dir, std::wstring& dispDir) {
+    std::string app = detectAppName(dir);
+    if (!app.empty()) return app;
+    ac::path::AppIdentity id = ac::path::findAppIdentity(dir);
+    if (!id.name.empty()) {
+        if (!id.root.empty()) dispDir = id.root;
+        return w2u(id.name);
+    }
+    size_t sep = dir.find_last_of(L'\\');
+    return w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
+}
+
 // 重建保护内容弹窗的行模型（原因 → 应用/目录 → 文件 三级拍平成一级）
 static void rebuildProtRows(app::PageState* page) {
     auto& m = g_model;
     page->protRows.clear();
-    struct DirGroup { std::wstring dir; std::string app; std::vector<ArchiveFile> items; };
+    struct DirGroup { std::wstring dir; std::wstring dispDir; std::string app; std::vector<ArchiveFile> items; };
     std::vector<std::pair<std::string, std::vector<DirGroup>>> byReason;
     // 全程持锁：protectedFiles / protectedReasons / failedPaths 共用 filesMutex
     std::lock_guard<std::mutex> lk(m.filesMutex);
@@ -163,12 +179,8 @@ static void rebuildProtRows(app::PageState* page) {
         if (!g) {
             DirGroup ng;
             ng.dir = dir;
-            std::string app = detectAppName(dir);
-            if (app.empty()) {
-                size_t sep = dir.find_last_of(L'\\');
-                app = w2u(sep != std::wstring::npos ? dir.substr(sep + 1) : dir);
-            }
-            ng.app = app;
+            ng.dispDir = dir;
+            ng.app = resolveAppName(dir, ng.dispDir);
             for (auto& br : byReason) {
                 if (br.first == reason) { br.second.push_back(std::move(ng)); g = &br.second.back(); break; }
             }
@@ -177,11 +189,11 @@ static void rebuildProtRows(app::PageState* page) {
         g->items.push_back(pf);
     }
     for (auto& br : byReason) {
-        page->protRows.push_back({0, br.first, {}, {}, 0, {}, {}, false});
+        page->protRows.push_back({0, br.first, {}, {}, 0, {}, {}, {}, false});
         for (auto& g : br.second) {
             bool expanded = std::find(page->expandedDirs.begin(), page->expandedDirs.end(), g.dir)
                             != page->expandedDirs.end();
-            page->protRows.push_back({1, {}, g.dir, g.app, (int)g.items.size(), {}, {}, false});
+            page->protRows.push_back({1, {}, g.dir, g.app, (int)g.items.size(), g.dispDir, {}, {}, false});
             if (!expanded) continue;
             for (size_t fi = 0; fi < g.items.size(); ++fi) {
                 auto& pf = g.items[fi];
@@ -191,7 +203,8 @@ static void rebuildProtRows(app::PageState* page) {
                     label = "[\xE5\xA4\xB1\xE8\xB4\xA5] " + label;  // [失败]
                     failedFlag = true;
                 }
-                page->protRows.push_back({2, {}, {}, {}, 0, pf.path, label, failedFlag, fi + 1 == g.items.size()});
+                page->protRows.push_back({2, {}, {}, {}, 0, {}, pf.path, label, failedFlag,
+                                          fi + 1 == g.items.size()});
             }
         }
     }
@@ -750,7 +763,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                                             .build();
                                         rui.text(rowId + ".p")
                                             .position(w - padR - pathW, 0).size(pathW, h)
-                                            .text(w2u(gdir))
+                                            .text(w2u(r.dispDir.empty() ? gdir : r.dispDir))
                                             .fontSize(fontSizeTiny).color(muted2)
                                             .horizontalAlign(core::HorizontalAlign::Right)
                                             .verticalAlign(core::VerticalAlign::Center)

@@ -5,6 +5,7 @@
 #include <shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "Version.lib")
 
 #include <algorithm>
 #include <vector>
@@ -97,8 +98,9 @@ std::wstring parentDir(const std::wstring& normalizedPath) {
 
 namespace {
 
-// 枚举一个 Uninstall 注册表键下所有子项的 InstallLocation
-void collectInstallLocations(HKEY hive, const wchar_t* subKeyPath, std::vector<std::wstring>& out) {
+// 枚举一个 Uninstall 注册表键下所有子项的 InstallLocation + DisplayName
+void collectInstallLocations(HKEY hive, const wchar_t* subKeyPath,
+                             std::vector<InstalledProgram>& out) {
     HKEY uninstall = nullptr;
     if (RegOpenKeyExW(hive, subKeyPath, 0, KEY_READ, &uninstall) != ERROR_SUCCESS) {
         return;
@@ -118,12 +120,20 @@ void collectInstallLocations(HKEY hive, const wchar_t* subKeyPath, std::vector<s
                                  reinterpret_cast<LPBYTE>(loc), &size) == ERROR_SUCCESS
                 && (type == REG_SZ || type == REG_EXPAND_SZ) && size > sizeof(wchar_t)) {
                 std::wstring p(loc);
-                // 清理：去空格、确保尾反斜杠、转小写
+                // 清理：去空格、确保尾反斜杠、转小写（前缀匹配用）
                 while (!p.empty() && (p.back() == L' ')) p.pop_back();
                 if (p.size() >= 2 && p[1] == L':') {  // 只接受盘符路径
                     if (p.back() != L'\\') p.push_back(L'\\');
                     for (auto& c : p) c = static_cast<wchar_t>(::towlower(c));
-                    out.push_back(p);
+                    wchar_t disp[MAX_PATH] = {};
+                    DWORD dsize = sizeof(disp);
+                    std::wstring display;
+                    if (RegQueryValueExW(sub, L"DisplayName", nullptr, &type,
+                                         reinterpret_cast<LPBYTE>(disp), &dsize) == ERROR_SUCCESS
+                        && (type == REG_SZ || type == REG_EXPAND_SZ) && dsize > sizeof(wchar_t)) {
+                        display = disp;
+                    }
+                    out.push_back({p, display});
                 }
             }
             RegCloseKey(sub);
@@ -134,18 +144,27 @@ void collectInstallLocations(HKEY hive, const wchar_t* subKeyPath, std::vector<s
 
 } // namespace
 
+const std::vector<InstalledProgram>& installedPrograms() {
+    static std::vector<InstalledProgram> progs;
+    static bool loaded = false;
+    if (loaded) return progs;
+    loaded = true;
+    // 三个注册表位置：HKLM 64位、HKLM 32位（WOW6432Node）、当前用户
+    collectInstallLocations(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", progs);
+    collectInstallLocations(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", progs);
+    collectInstallLocations(HKEY_CURRENT_USER,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", progs);
+    return progs;
+}
+
 const std::vector<std::wstring>& installedProgramDirs() {
     static std::vector<std::wstring> dirs;
     static bool loaded = false;
     if (loaded) return dirs;
     loaded = true;
-    // 三个注册表位置：HKLM 64位、HKLM 32位（WOW6432Node）、当前用户
-    collectInstallLocations(HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", dirs);
-    collectInstallLocations(HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", dirs);
-    collectInstallLocations(HKEY_CURRENT_USER,
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", dirs);
+    for (const auto& p : installedPrograms()) dirs.push_back(p.dir);
     return dirs;
 }
 
@@ -196,6 +215,184 @@ bool dirContainsProjectMarker(const std::wstring& dir) {
         return true;
     }
     return false;
+}
+
+std::wstring exeDisplayName(const std::wstring& exePath) {
+    DWORD handle = 0;
+    DWORD size = GetFileVersionInfoSizeW(exePath.c_str(), &handle);
+    if (size == 0) return {};
+    std::vector<BYTE> buf(size);
+    if (!GetFileVersionInfoW(exePath.c_str(), 0, size, buf.data())) return {};
+    // 查翻译表拿语言/代码页，拼出 StringFileInfo 前缀
+    struct LangAndCodePage { WORD lang; WORD codePage; };
+    LangAndCodePage* langs = nullptr;
+    UINT cb = 0;
+    std::wstring prefix;
+    if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation",
+                       reinterpret_cast<LPVOID*>(&langs), &cb)
+        && cb >= sizeof(LangAndCodePage) && langs) {
+        wchar_t hdr[40] = {};
+        swprintf(hdr, 40, L"\\StringFileInfo\\%04x%04x\\", langs[0].lang, langs[0].codePage);
+        prefix = hdr;
+    } else {
+        prefix = L"\\StringFileInfo\\040904b0\\";  // 美式英语 Unicode 兜底
+    }
+    for (const wchar_t* key : {L"FileDescription", L"ProductName"}) {
+        wchar_t* val = nullptr;
+        UINT vlen = 0;
+        if (VerQueryValueW(buf.data(), (prefix + key).c_str(),
+                           reinterpret_cast<LPVOID*>(&val), &vlen)
+            && val && vlen > 0 && val[0] != L'\0') {
+            std::wstring s = val;
+            while (!s.empty() && iswspace(s.back())) s.pop_back();
+            if (!s.empty()) return s;
+        }
+    }
+    return {};
+}
+
+std::wstring firstExeInDir(const std::wstring& dir) {
+    if (dir.empty()) return {};
+    std::wstring base = dir;
+    if (base.back() != L'\\') base.push_back(L'\\');
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((base + L"*.exe").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    std::wstring dirName = fileName(dir);
+    std::wstring best;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring fn = fd.cFileName;
+        // 优先与目录同名的 exe（绿软惯例：DirName\DirName.exe）
+        if (fn.size() > 4 && _wcsicmp(fn.substr(0, fn.size() - 4).c_str(), dirName.c_str()) == 0) {
+            best = base + fn;
+            break;
+        }
+        if (best.empty()) best = base + fn;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return best;
+}
+
+namespace {
+
+// 无意义的目录段：data/cache 这类通用名不该当软件名展示
+bool isGenericSegment(const std::wstring& seg) {
+    static const wchar_t* generic[] = {
+        L"data", L"assets", L"asset", L"resources", L"resource", L"res",
+        L"mods", L"bin", L"lib", L"libs", L"cache", L"temp", L"tmp",
+        L"update", L"updates", L"files", L"file", L"common", L"versions",
+        L"download", L"downloads", L"app", L"apps", L"plugin", L"plugins",
+        L"skins", L"config", L"save", L"saves", L"backup", L"backups",
+        L"log", L"logs", L"output", L"out", L"pack", L"packs", L"patch",
+        L"patches", L"userdata", L"user", L"content", L"media", L"image",
+        L"images", L"img", L"video", L"videos", L"audio", L"sound",
+    };
+    for (const auto* g : generic) {
+        if (_wcsicmp(seg.c_str(), g) == 0) return true;
+    }
+    return false;
+}
+
+// 版本号样式目录段：1.1.0.2264 / 2024.6 / 3.2 之类
+bool isVersionSegment(const std::wstring& seg) {
+    int dots = 0, digits = 0, others = 0;
+    for (wchar_t c : seg) {
+        if (c == L'.') { ++dots; continue; }
+        if (iswdigit(c)) { ++digits; continue; }
+        ++others;
+    }
+    return digits > 0 && others == 0 && dots > 0;  // 至少一个点，纯数字
+}
+
+// 公共/系统目录：其中的 exe（安装器残留、系统组件）不归属任何具体软件，
+// 向上找 exe 时碰到这些目录必须停手，避免把文件错认给无关 exe
+bool isSharedAncestor(const std::wstring& dir) {
+    std::wstring lower;
+    lower.reserve(dir.size());
+    for (wchar_t c : dir) lower.push_back(static_cast<wchar_t>(::towlower(c)));
+    if (lower.size() <= 3) return true;  // 盘根
+    if (lower.find(L"\\windows\\") != std::wstring::npos) return true;
+    if (lower.back() != L'\\') lower.push_back(L'\\');
+    // 以这些目录本身为终点（等于判断：其下的具体软件目录不受影响）
+    static const wchar_t* sharedEnds[] = {
+        L"\\program files\\", L"\\program files (x86)\\", L"\\programdata\\",
+        L"\\users\\public\\", L"\\appdata\\local\\temp\\",
+        L"\\appdata\\locallow\\temp\\", L"\\appdata\\roaming\\temp\\",
+    };
+    for (const auto* s : sharedEnds) {
+        size_t n = wcslen(s);
+        if (lower.size() >= n && lower.compare(lower.size() - n, n, s) == 0) return true;
+    }
+    // 末段是下载/桌面/临时类目录
+    std::wstring seg = fileName(dir);
+    for (auto& c : seg) c = static_cast<wchar_t>(::towlower(c));
+    static const wchar_t* lastSegs[] = {
+        L"downloads", L"download", L"desktop", L"temp", L"tmp",
+    };
+    for (const auto* s : lastSegs) {
+        if (seg == s) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+AppIdentity findAppIdentity(const std::wstring& fileDir) {
+    // ① 向上找 exe（最多 4 级），读版本资源显示名——最具体。
+    //    碰到公共/系统目录立即停手，防止错认给无关 exe（如 Temp 里的安装器残留）
+    std::wstring ancestor = fileDir;
+    for (int level = 0; level < 4 && ancestor.size() > 3; ++level) {
+        if (isSharedAncestor(ancestor)) break;
+        std::wstring exe = firstExeInDir(ancestor);
+        if (!exe.empty()) {
+            std::wstring name = exeDisplayName(exe);
+            if (name.empty()) {
+                std::wstring base = fileName(exe);
+                if (base.size() > 4) base = base.substr(0, base.size() - 4);
+                name = base;
+            }
+            return {ancestor, name};
+        }
+        std::wstring up = parentDir(ancestor);
+        if (up == ancestor || up.empty()) break;
+        ancestor = up;
+    }
+    // ② 反查注册表 InstallLocation（取最长匹配，子目录归属最具体的软件）
+    std::wstring lower;
+    lower.reserve(fileDir.size());
+    for (wchar_t c : fileDir) lower.push_back(static_cast<wchar_t>(::towlower(c)));
+    size_t bestLen = 0;
+    const InstalledProgram* best = nullptr;
+    for (const auto& p : installedPrograms()) {
+        if (p.name.empty()) continue;
+        if (lower.size() >= p.dir.size()
+            && lower.compare(0, p.dir.size(), p.dir) == 0
+            && p.dir.size() > bestLen) {
+            bestLen = p.dir.size();
+            best = &p;
+        }
+    }
+    if (best) {
+        std::wstring root = best->dir;
+        while (root.size() > 3 && root.back() == L'\\') root.pop_back();
+        return {root, best->name};
+    }
+    // ③ 兜底：最后一个有意义的目录段（跳过通用名和版本号）
+    std::wstring seg = fileDir;
+    std::wstring root = fileDir;
+    for (int level = 0; level < 6 && !seg.empty(); ++level) {
+        std::wstring cur = fileName(seg);
+        if (cur.empty()) break;
+        if (!isGenericSegment(cur) && !isVersionSegment(cur)) {
+            return {root, cur};
+        }
+        std::wstring up = parentDir(seg);
+        if (up == seg || up.empty()) break;
+        seg = up;
+        root = up;
+    }
+    return {};
 }
 
 }} // namespace ac::path
